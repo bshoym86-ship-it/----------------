@@ -11,4 +11,5 @@ COPY . .
 ENV PORT=8000
 EXPOSE 8000
 
-CMD ["python", "-m", "uvicorn", "beshoy_bot:app", "--host", "0.0.0.0", "--port", "8000"]
+# الكود بيقرأ PORT من env داخلياً (os.environ.get("PORT", "8000"))
+CMD ["python", "beshoy_bot.py"]

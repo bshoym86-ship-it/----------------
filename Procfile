@@ -1,1 +1,1 @@
-web: python -m uvicorn beshoy_bot:app --host 0.0.0.0 --port $PORT
+web: python beshoy_bot.py

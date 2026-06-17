@@ -9,13 +9,11 @@ import string
 import logging
 import aiohttp
 from datetime import datetime, timezone, timedelta
-from typing import Optional, Dict, Any
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.filters import Command
 from aiogram.types import (
     Message, CallbackQuery, 
-    InlineKeyboardButton, InlineKeyboardMarkup,
-    FSInputFile
+    InlineKeyboardButton, InlineKeyboardMarkup
 )
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -61,10 +59,9 @@ def save_data():
 
 DB = load_data()
 
-# ─── States (حالة المستخدم) ──────────────────────────────
+# ─── States ──────────────────────────────────────────────
 class AdStates(StatesGroup):
     waiting_token = State()
-    waiting_proxy = State()
     waiting_account_id = State()
     waiting_page_id = State()
     waiting_image = State()
@@ -122,7 +119,7 @@ def ensure_user(uid: int, username: str = "", first_name: str = ""):
         save_data()
     return DB["users"][uid_str]
 
-# ─── أزرار الـ Inline Keyboard ───────────────────────────
+# ─── أزرار ───────────────────────────────────────────────
 def kb_main(subscribed: bool):
     rows = []
     if subscribed:
@@ -142,19 +139,6 @@ def kb_gates():
         [InlineKeyboardButton(text="🎪 Event Campaign", callback_data="gate:event")],
         [InlineKeyboardButton(text="🏠 الرئيسية", callback_data="home")]
     ])
-
-def kb_objectives():
-    objs = {
-        "CONVERSATIONS": "💬 محادثات",
-        "MESSAGES_MESSENGER": "📨 ماسنجر",
-        "MESSAGES_WHATSAPP": "📱 واتساب",
-        "LINK_CLICKS": "🔗 نقرات",
-        "POST_ENGAGEMENT": "📌 تفاعل",
-        "VIDEO_VIEWS": "🎬 فيديو"
-    }
-    rows = [[InlineKeyboardButton(text=name, callback_data=f"obj:{key}")] for key, name in objs.items()]
-    rows.append([InlineKeyboardButton(text="🏠 الرئيسية", callback_data="home")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 def kb_gender():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -192,35 +176,24 @@ def kb_admin():
         [InlineKeyboardButton(text="🏠 خروج", callback_data="home")]
     ])
 
-# ─── Facebook API Functions ──────────────────────────────
-async def fb_request(method: str, endpoint: str, data: dict = None, proxy: str = None) -> dict:
+# ─── Facebook API ────────────────────────────────────────
+async def fb_request(method: str, endpoint: str, data: dict = None) -> dict:
     url = f"{FB_API}/{endpoint}"
     async with aiohttp.ClientSession() as session:
         try:
             if method == "GET":
-                async with session.get(url, params=data, proxy=proxy, timeout=15) as resp:
+                async with session.get(url, params=data, timeout=15) as resp:
                     return await resp.json()
             else:
-                async with session.post(url, data=data, proxy=proxy, timeout=30) as resp:
+                async with session.post(url, data=data, timeout=30) as resp:
                     return await resp.json()
         except Exception as e:
             return {"error": {"message": str(e)}}
 
-async def fb_check_token(token: str, proxy: str = None) -> dict:
-    """التحقق من التوكن والصلاحيات المطلوبة"""
-    result = await fb_request("GET", "me", {"access_token": token, "fields": "id,name"}, proxy)
-    if "error" not in result:
-        # التحقق من الصلاحيات
-        perms = await fb_request("GET", "me/permissions", {"access_token": token}, proxy)
-        if "data" in perms:
-            perms_list = [p["permission"] for p in perms["data"] if p.get("status") == "granted"]
-            result["permissions"] = perms_list
-            if "publish_pages" not in perms_list:
-                result["warning"] = "⚠️ صلاحية publish_pages غير موجودة - قد تواجه مشاكل في النشر"
-    return result
+async def fb_check_token(token: str) -> dict:
+    return await fb_request("GET", "me", {"access_token": token, "fields": "id,name"})
 
-async def fb_upload_image(token: str, page_id: str, image_bytes: bytes, proxy: str = None) -> dict:
-    """رفع الصورة على الصفحة - يجب أن يكون التوكن يملك publish_pages"""
+async def fb_upload_image(token: str, page_id: str, image_bytes: bytes) -> dict:
     url = f"{FB_API}/{page_id}/photos"
     data = {"access_token": token, "published": "false"}
     async with aiohttp.ClientSession() as session:
@@ -229,20 +202,15 @@ async def fb_upload_image(token: str, page_id: str, image_bytes: bytes, proxy: s
         for k, v in data.items():
             form.add_field(k, v)
         try:
-            async with session.post(url, data=form, proxy=proxy, timeout=30) as resp:
+            async with session.post(url, data=form, timeout=30) as resp:
                 result = await resp.json()
                 if "id" in result:
                     return {"ok": True, "id": result["id"]}
-                error_msg = result.get("error", {}).get("message", "Unknown")
-                # معالجة خاصة للخطأ #200
-                if "#200" in str(error_msg) or "not allowed to publish" in str(error_msg):
-                    error_msg = "❌ Access Token لا يملك صلاحية publish_pages. اطلب صلاحيات جديدة من Facebook."
-                return {"ok": False, "error": error_msg}
+                return {"ok": False, "error": result.get("error", {}).get("message", "Unknown")}
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
-async def fb_create_dark_post(token: str, page_id: str, image_id: str, message: str, link: str = "", proxy: str = None) -> dict:
-    """إنشاء Dark Post - الصورة يجب أن تكون مرفوعة مسبقاً كـ unpublished photo"""
+async def fb_create_dark_post(token: str, page_id: str, image_id: str, message: str, link: str = "") -> dict:
     data = {
         "access_token": token, "message": message,
         "attached_media": f'[{{"media_fbid": "{image_id}"}}]',
@@ -250,34 +218,20 @@ async def fb_create_dark_post(token: str, page_id: str, image_id: str, message: 
     }
     if link:
         data["link"] = link
-    result = await fb_request("POST", f"{page_id}/feed", data, proxy)
-    error = result.get("error", {}).get("message", "")
-    
-    # معالجة خاصة للأخطاء الشائعة
-    if "#200" in str(error) or "not allowed" in str(error):
-        error = "❌ الصلاحيات غير كافية. تأكد من أن التوكن يملك publish_pages"
-    elif "#803" in str(error):
-        error = "❌ الصورة غير صالحة أو منتهية الصلاحية"
-    elif "#10" in str(error):
-        error = "❌ الحساب أو الصفحة غير موجودة"
-    
-    return {
-        "ok": "id" in result,
-        "id": result.get("id"),
-        "error": error if error else result.get("error", {}).get("message", "")
-    }
+    result = await fb_request("POST", f"{page_id}/feed", data)
+    return {"ok": "id" in result, "id": result.get("id"), "error": result.get("error", {}).get("message", "")}
 
-async def fb_create_campaign(token: str, acc_id: str, objective: str, budget: float, proxy: str = None) -> dict:
+async def fb_create_campaign(token: str, acc_id: str, objective: str, budget: float) -> dict:
     data = {
         "access_token": token,
         "name": f"Boost_{int(datetime.now().timestamp())}",
         "objective": objective, "status": "PAUSED",
         "special_ad_categories": "[]", "daily_budget": int(budget * 100)
     }
-    result = await fb_request("POST", f"act_{acc_id}/campaigns", data, proxy)
+    result = await fb_request("POST", f"act_{acc_id}/campaigns", data)
     return {"ok": "id" in result, "id": result.get("id"), "error": result.get("error", {}).get("message", "")}
 
-async def fb_create_adset(token: str, acc_id: str, camp_id: str, budget: float, targeting: dict, opt_goal: str = "REACH", proxy: str = None) -> dict:
+async def fb_create_adset(token: str, acc_id: str, camp_id: str, budget: float, targeting: dict, opt_goal: str = "REACH") -> dict:
     data = {
         "access_token": token,
         "name": f"AdSet_{int(datetime.now().timestamp())}",
@@ -285,24 +239,16 @@ async def fb_create_adset(token: str, acc_id: str, camp_id: str, budget: float, 
         "targeting": json.dumps(targeting), "status": "PAUSED",
         "billing_event": "IMPRESSIONS", "optimization_goal": opt_goal
     }
-    result = await fb_request("POST", f"act_{acc_id}/adsets", data, proxy)
+    result = await fb_request("POST", f"act_{acc_id}/adsets", data)
     return {"ok": "id" in result, "id": result.get("id"), "error": result.get("error", {}).get("message", "")}
 
-async def fb_create_ad(token: str, acc_id: str, adset_id: str, creative: dict, status: str = "ACTIVE", proxy: str = None) -> dict:
+async def fb_create_ad(token: str, acc_id: str, adset_id: str, creative: dict, status: str = "ACTIVE") -> dict:
     data = {
         "access_token": token,
         "name": f"Ad_{int(datetime.now().timestamp())}",
         "adset_id": adset_id, "creative": json.dumps(creative), "status": status
     }
-    result = await fb_request("POST", f"act_{acc_id}/ads", data, proxy)
-    return {"ok": "id" in result, "id": result.get("id"), "error": result.get("error", {}).get("message", "")}
-
-async def fb_create_event(token: str, page_id: str, name: str, desc: str, start: str, end: str, proxy: str = None) -> dict:
-    data = {
-        "access_token": token, "name": name, "description": desc,
-        "start_time": start, "end_time": end
-    }
-    result = await fb_request("POST", f"{page_id}/events", data, proxy)
+    result = await fb_request("POST", f"act_{acc_id}/ads", data)
     return {"ok": "id" in result, "id": result.get("id"), "error": result.get("error", {}).get("message", "")}
 
 # ─── Handlers ────────────────────────────────────────────
@@ -329,7 +275,6 @@ async def cmd_admin(message: Message, state: FSMContext):
 @router.message(AdStates.waiting_admin_password)
 async def process_admin_password(message: Message, state: FSMContext):
     if message.text == ADMIN_PASS:
-        await state.set_state(AdStates.waiting_admin_gen_code)  # Just to mark as admin
         await state.clear()
         await message.answer("✅ مرحباً مشرف!", reply_markup=kb_admin())
     else:
@@ -407,21 +352,14 @@ async def process_token(message: Message, state: FSMContext):
     token = message.text.strip()
     info = await fb_check_token(token)
     
-    if "error" in info:
+    if "id" not in info:
         await state.clear()
         await message.answer(f"❌ التوكن غير صالح: {info.get('error', {}).get('message', '')}", reply_markup=kb_home())
         return
     
-    warning = info.get("warning", "")
-    if warning:
-        await message.answer(warning)
-    
     await state.update_data(token=token)
-    gate = (await state.get_data()).get("gate")
-    
-    if gate in ["dark_post", "boost_post", "page_like", "partner_ship", "event"]:
-        await state.set_state(AdStates.waiting_account_id)
-        await message.answer("✅ تم التحقق من التوكن.\n🆔 أدخل Account ID:", reply_markup=kb_back())
+    await state.set_state(AdStates.waiting_account_id)
+    await message.answer("✅ تم التحقق من التوكن.\n🆔 أدخل Account ID:", reply_markup=kb_back())
 
 @router.message(AdStates.waiting_account_id)
 async def process_account_id(message: Message, state: FSMContext):
@@ -454,8 +392,6 @@ async def process_page_id(message: Message, state: FSMContext):
     elif gate == "page_like":
         await state.set_state(AdStates.waiting_budget)
         await message.answer("✅ تم حفظ Page ID.\n💰 أدخل الميزانية اليومية ($):", reply_markup=kb_back())
-    elif gate == "partner_ship":
-        await message.answer("✅ تم حفظ Page ID.\n🎯 اختر الهدف:", reply_markup=kb_objectives())
     elif gate == "event":
         await state.set_state(AdStates.waiting_event_name)
         await message.answer("✅ تم حفظ Page ID.\n🎪 أدخل اسم الحدث:", reply_markup=kb_back())
@@ -478,13 +414,7 @@ async def process_image(message: Message, state: FSMContext):
     result = await fb_upload_image(data["token"], data["page_id"], image_bytes)
     
     if not result.get("ok"):
-        error_msg = result.get('error', 'خطأ غير معروف')
-        
-        # إذا كان الخطأ متعلقاً بالصلاحيات، أعطِ تعليمات إضافية
-        if "publish_pages" in str(error_msg) or "#200" in str(error_msg):
-            error_msg += "\n\n💡 <b>الحل:</b>\n1. اذهب إلى https://developers.facebook.com/\n2. اطلب صلاحيات publish_pages و pages_read_engagement\n3. جدّد التوكن"
-        
-        await message.answer(f"❌ فشل رفع الصورة:\n{error_msg}", reply_markup=kb_home(), parse_mode="HTML")
+        await message.answer(f"❌ فشل رفع الصورة: {result.get('error')}", reply_markup=kb_home())
         return
     
     await state.update_data(image_id=result["id"])
@@ -492,7 +422,7 @@ async def process_image(message: Message, state: FSMContext):
     await message.answer("✅ تم رفع الصورة.\n💬 أرسل النص الأساسي للإعلان:", reply_markup=kb_back())
 
 @router.message(AdStates.waiting_message)
-async def process_message(message: Message, state: FSMContext):
+async def process_message_text(message: Message, state: FSMContext):
     if len(message.text) < 5:
         await message.answer("❌ النص قصير جداً (على الأقل 5 أحرف)", reply_markup=kb_back())
         return
@@ -552,14 +482,6 @@ async def process_post_id(message: Message, state: FSMContext):
     await state.update_data(post_id=message.text)
     await state.set_state(AdStates.waiting_budget)
     await message.answer("✅ تم حفظ Post ID.\n💰 أدخل الميزانية اليومية ($):", reply_markup=kb_back())
-
-@router.callback_query(F.data.startswith("obj:"))
-async def cb_objective(callback: CallbackQuery, state: FSMContext):
-    obj = callback.data.split(":")[1]
-    await state.update_data(objective=obj)
-    await state.set_state(AdStates.waiting_budget)
-    await callback.message.edit_text(f"✅ الهدف: {obj}\n💰 أدخل الميزانية اليومية ($):", reply_markup=kb_back())
-    await callback.answer()
 
 @router.message(AdStates.waiting_event_name)
 async def process_event_name(message: Message, state: FSMContext):
@@ -635,8 +557,6 @@ async def process_days(message: Message, state: FSMContext):
         summary += f"⚧ الجنس: {data.get('gender')}\n"
     elif gate == "boost_post":
         summary += f"📝 Post ID: {data.get('post_id')}\n"
-    elif gate == "partner_ship":
-        summary += f"🎯 الهدف: {data.get('objective')}\n"
     elif gate == "event":
         summary += f"🎪 الحدث: {data.get('event_name')}\n"
         summary += f"🕐 البداية: {data.get('event_start')}\n"
@@ -696,8 +616,6 @@ async def cb_confirm_yes(callback: CallbackQuery, state: FSMContext):
                 raise Exception(ad.get("error"))
             
             await callback.message.edit_text(f"✅ تم إنشاء الإعلان بنجاح!\n\n🆔 Ad ID: <code>{ad['id']}</code>", reply_markup=kb_home(), parse_mode="HTML")
-        
-        # TODO: Add other gates (boost_post, page_like, partner_ship, event)
         
     except Exception as e:
         await callback.message.edit_text(f"❌ فشل إنشاء الإعلان:\n{str(e)}", reply_markup=kb_home())

@@ -319,6 +319,19 @@ async def process_redeem_code(message: Message, state: FSMContext):
     until = (datetime.now(timezone.utc) + timedelta(hours=hours)).isoformat(timespec="seconds")
     
     uid_str = str(message.from_user.id)
+    
+    # ✅ إصلاح الخطأ: إنشاء المستخدم لو مش موجود أصلاً
+    if uid_str not in DB["users"]:
+        DB["users"][uid_str] = {
+            "uid": message.from_user.id,
+            "un": message.from_user.username or "",
+            "fn": message.from_user.first_name or "",
+            "joined": now_iso(),
+            "removed": False,
+            "sub": ""
+        }
+        DB["stats"]["users"] = DB["stats"].get("users", 0) + 1
+    
     DB["users"][uid_str]["sub"] = until
     DB["users"][uid_str]["removed"] = False
     DB["codes"][code]["used_by"] = message.from_user.id

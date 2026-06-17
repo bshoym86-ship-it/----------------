@@ -1,315 +1,99 @@
-# /// script
-# requires-python = "==3.11.*"
-# dependencies = [
-#   "codewords-client==0.4.6",
-#   "fastapi==0.116.1",
-#   "httpx==0.28.1",
-#   "python-multipart==0.0.20",
-# ]
-# [tool.env-checker]
-# env_vars = [
-#   "PORT=8000",
-#   "LOGLEVEL=INFO",
-#   "TELEGRAM_BOT_TOKEN",
-#   "FB_ACCESS_TOKEN",  # اختياري، سيُطلب من المستخدم إذا لم يوجد
-# ]
-# ///
-
 """
-BESHOY BOOST BOT v4 — إنشاء إعلانات فيسبوك (Dark Posts) باستخدام Access Token
-يدعم رفع الصور، استهداف متقدم، التحكم بحالة الإعلان (نشط/متوقف)
+BESHOY BOT - النسخة البسيطة جداً
+aiogram 3 + JSON (بدون Redis)
 """
-
 import os
-import re
 import json
 import secrets
 import string
 import logging
-import traceback
+import aiohttp
 from datetime import datetime, timezone, timedelta
-from typing import Optional, Any, Dict
-
-import httpx
-from codewords_client import logger, run_service, redis_client
-from fastapi import FastAPI, Request
-from pydantic import BaseModel, Field
-
-app = FastAPI(title="Beshoy Boost Bot v4", version="4.0.0")
-
-TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-TG = f"https://api.telegram.org/bot{TOKEN}"
-BOT_NAME = "BESHOY BOOST BOT"
-ADMIN_PASS = "Nemo@1986"
-ADMIN_CMD = "beshoy"
-SUPPORT_URL = "https://t.me/your_support_username"
-
-# تسجيل الأخطاء
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[logging.FileHandler('bot_errors.log'), logging.StreamHandler()]
+from aiogram import Bot, Dispatcher, Router, F
+from aiogram.filters import Command
+from aiogram.types import (
+    Message, CallbackQuery, 
+    InlineKeyboardButton, InlineKeyboardMarkup
 )
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
+from dotenv import load_dotenv
+
+load_dotenv()
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# أهداف الإعلانات المدعومة
-OBJECTIVES = {
-    "CONVERSATIONS": "محادثات",
-    "MESSAGES_MESSENGER": "رسائل ماسنجر",
-    "MESSAGES_WHATSAPP": "رسائل واتساب",
-    "LINK_CLICKS": "نقرات رابط",
-    "POST_ENGAGEMENT": "تفاعل بوست",
-    "VIDEO_VIEWS": "مشاهدات فيديو",
-}
-OBJECTIVE_IDS = list(OBJECTIVES.keys())
+# ─── الإعدادات ───────────────────────────────────────────
+TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+ADMIN_PASS = os.environ.get("ADMIN_PASS", "Nemo@1986")
+SUPPORT_URL = os.environ.get("SUPPORT_URL", "https://t.me/your_support")
+DATA_FILE = "data.json"
+FB_API = "https://graph.facebook.com/v18.0"
 
-# دوال مساعدة
+if not TOKEN:
+    raise ValueError("❌ TELEGRAM_BOT_TOKEN مش متظبط!")
+
+if ADMIN_PASS == "Nemo@1986":
+    logger.warning("⚠️ غيّر ADMIN_PASS من متغيرات البيئة!")
+
+bot = Bot(token=TOKEN)
+storage = MemoryStorage()
+dp = Dispatcher(storage=storage)
+router = Router()
+dp.include_router(router)
+
+# ─── قاعدة البيانات (ملف JSON) ───────────────────────────
+def load_data():
+    if not os.path.exists(DATA_FILE):
+        return {"users": {}, "codes": {}, "proxies": [], "stats": {"users": 0, "requests": 0}}
+    try:
+        with open(DATA_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except:
+        return {"users": {}, "codes": {}, "proxies": [], "stats": {"users": 0, "requests": 0}}
+
+def save_data():
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(DB, f, ensure_ascii=False, indent=2)
+
+DB = load_data()
+
+# ─── States ──────────────────────────────────────────────
+class AdStates(StatesGroup):
+    waiting_token = State()
+    waiting_account_id = State()
+    waiting_page_id = State()
+    waiting_image = State()
+    waiting_message = State()
+    waiting_link = State()
+    waiting_country = State()
+    waiting_age = State()
+    waiting_post_id = State()
+    waiting_event_name = State()
+    waiting_event_desc = State()
+    waiting_event_start = State()
+    waiting_event_end = State()
+    waiting_budget = State()
+    waiting_days = State()
+    waiting_redeem_code = State()
+    waiting_admin_password = State()
+    waiting_admin_gen_code = State()
+    waiting_admin_set_user = State()
+    waiting_admin_remove_user = State()
+    waiting_admin_broadcast = State()
+    waiting_admin_add_proxies = State()
+
+# ─── دوال مساعدة ─────────────────────────────────────────
 def now_iso():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
-def gen_code(prefix="BM", length=12):
+def gen_code():
     chars = string.ascii_uppercase + string.digits
-    return f"{prefix}-{''.join(secrets.choice(chars) for _ in range(length))}"
+    return f"BM-{''.join(secrets.choice(chars) for _ in range(12))}"
 
-# ─── دوال تيليجرام ─────────────────────────────────────
-async def tg(method: str, data: dict) -> dict:
-    async with httpx.AsyncClient(timeout=15) as c:
-        r = await c.post(f"{TG}/{method}", json=data)
-        return r.json()
-
-async def send_msg(cid, text, kb=None):
-    d = {"chat_id": cid, "text": text, "parse_mode": "HTML"}
-    if kb:
-        d["reply_markup"] = kb
-    return await tg("sendMessage", d)
-
-async def edit_msg(cid, mid, text, kb=None):
-    d = {"chat_id": cid, "message_id": mid, "text": text, "parse_mode": "HTML"}
-    if kb:
-        d["reply_markup"] = kb
-    return await tg("editMessageText", d)
-
-async def answer_cb(cbid, text="", alert=False):
-    return await tg("answerCallbackQuery", {"callback_query_id": cbid, "text": text, "show_alert": alert})
-
-# ─── لوحات المفاتيح ─────────────────────────────────────
-def ikb(rows):
-    return {"inline_keyboard": rows}
-
-def btn(text, data="", url=""):
-    b = {"text": text}
-    if url:
-        b["url"] = url
-    else:
-        b["callback_data"] = data
-    return b
-
-# لوحة رئيسية
-def kb_main(is_sub):
-    rows = []
-    if is_sub:
-        rows.append([btn("🚀 إعلان جديد", "ad:start")])
-    rows.append([btn("🎟 تفعيل كود", "redeem"), btn("🛠 دعم", url=SUPPORT_URL)])
-    return ikb(rows)
-
-# لوحة اختيار الهدف
-def kb_objectives():
-    rows = [[btn(name, f"obj:{key}")] for key, name in OBJECTIVES.items()]
-    rows.append([btn("🏠 الرئيسية", "home")])
-    return ikb(rows)
-
-# لوحة اختيار الجنس
-def kb_gender():
-    return ikb([
-        [btn("👨 ذكر", "gender:male"), btn("👩 أنثى", "gender:female")],
-        [btn("👫 الكل", "gender:all")],
-        [btn("🏠 الرئيسية", "home")]
-    ])
-
-# لوحة حالة التشغيل
-def kb_ad_status():
-    return ikb([
-        [btn("▶️ نشط فوراً", "status:ACTIVE")],
-        [btn("⏸ متوقف مؤقتاً", "status:PAUSED")],
-        [btn("🏠 الرئيسية", "home")]
-    ])
-
-# أزرار التحكم بالإعلان بعد التشغيل
-def kb_ad_controls(ad_id, current_status):
-    rows = []
-    if current_status == "ACTIVE":
-        rows.append([btn("⏸ إيقاف الإعلان", f"ctrl:pause:{ad_id}")])
-    else:
-        rows.append([btn("▶️ تشغيل الإعلان", f"ctrl:resume:{ad_id}")])
-    rows.append([btn("🏠 الرئيسية", "home")])
-    return ikb(rows)
-
-# لوحة تأكيد
-def kb_confirm():
-    return ikb([
-        [btn("✅ تأكيد", "confirm:yes")],
-        [btn("❌ إلغاء", "confirm:no")],
-        [btn("🏠 الرئيسية", "home")]
-    ])
-
-# لوحة رجوع
-def kb_back():
-    return ikb([[btn("🔙 رجوع", "back")]])
-
-# لوحة المشرف
-def kb_admin():
-    return ikb([
-        [btn("🎟 توليد كود", "admin:gen_code")],
-        [btn("👤 تمديد مشترك", "admin:set_user")],
-        [btn("🗑 حذف مشترك", "admin:remove_user")],
-        [btn("📢 رسالة جماعية", "admin:broadcast")],
-        [btn("🌐 إضافة بروكسيات", "admin:add_proxies")],
-        [btn("📊 الإحصائيات", "admin:stats")],
-        [btn("🏠 خروج", "home")]
-    ])
-
-# لوحة رجوع للمشرف
-def kb_back_admin():
-    return ikb([[btn("🔙 لوحة التحكم", "admin:stats")]])
-
-# ─── دوال فيسبوك الجديدة (باستخدام Access Token) ────
-FB_API = "https://graph.facebook.com/v18.0"
-
-async def fb_check_token(access_token: str) -> dict:
-    """التحقق من صلاحية التوكن وجلب معلومات المستخدم"""
-    url = f"{FB_API}/me"
-    params = {"access_token": access_token, "fields": "id,name,accounts{id,name}"}
-    async with httpx.AsyncClient(timeout=15) as c:
-        resp = await c.get(url, params=params)
-        return resp.json()
-
-async def fb_upload_image(access_token: str, page_id: str, image_bytes: bytes) -> str:
-    """رفع صورة إلى صفحة فيسبوك (غير منشورة) وإرجاع معرف الصورة"""
-    url = f"{FB_API}/{page_id}/photos"
-    files = {"source": ("image.jpg", image_bytes, "image/jpeg")}
-    params = {"access_token": access_token, "published": "false"}
-    async with httpx.AsyncClient(timeout=30) as c:
-        resp = await c.post(url, files=files, params=params)
-        data = resp.json()
-        if "id" in data:
-            return data["id"]
-        else:
-            raise Exception(f"فشل رفع الصورة: {data}")
-
-async def fb_create_dark_post(access_token: str, page_id: str, image_id: str,
-                               message: str, headline: str = None, description: str = None) -> str:
-    """إنشاء منشور غير منشور (Dark Post) مرتبط بصفحة"""
-    url = f"{FB_API}/{page_id}/feed"
-    payload = {
-        "access_token": access_token,
-        "message": message,
-        "attached_media": f'{{"media_fbid":"{image_id}"}}',
-        "published": "false",
-    }
-    if headline:
-        payload["child_attachments"] = [{"link": "", "name": headline, "description": description or ""}]
-    async with httpx.AsyncClient(timeout=30) as c:
-        resp = await c.post(url, data=payload)
-        data = resp.json()
-        if "id" in data:
-            return data["id"]
-        else:
-            raise Exception(f"فشل إنشاء المنشور: {data}")
-
-async def fb_create_campaign(access_token: str, account_id: str, objective: str, status: str = "PAUSED") -> str:
-    """إنشاء حملة إعلانية"""
-    url = f"{FB_API}/act_{account_id}/campaigns"
-    params = {
-        "access_token": access_token,
-        "name": f"Boost_{int(datetime.now().timestamp())}",
-        "objective": objective,
-        "status": status,
-        "special_ad_categories": [],
-    }
-    async with httpx.AsyncClient(timeout=30) as c:
-        resp = await c.post(url, params=params)
-        data = resp.json()
-        if "id" in data:
-            return data["id"]
-        else:
-            raise Exception(f"فشل إنشاء الحملة: {data}")
-
-async def fb_create_adset(access_token: str, account_id: str, campaign_id: str,
-                           daily_budget: float, targeting: dict, status: str = "PAUSED") -> str:
-    """إنشاء مجموعة إعلانات مع الاستهداف"""
-    url = f"{FB_API}/act_{account_id}/adsets"
-    params = {
-        "access_token": access_token,
-        "name": f"AdSet_{int(datetime.now().timestamp())}",
-        "campaign_id": campaign_id,
-        "daily_budget": int(daily_budget * 100),
-        "targeting": targeting,
-        "status": status,
-        "billing_event": "IMPRESSIONS",
-        "optimization_goal": "REACH",
-    }
-    async with httpx.AsyncClient(timeout=30) as c:
-        resp = await c.post(url, params=params)
-        data = resp.json()
-        if "id" in data:
-            return data["id"]
-        else:
-            raise Exception(f"فشل إنشاء مجموعة الإعلانات: {data}")
-
-async def fb_create_ad(access_token: str, account_id: str, adset_id: str, dark_post_id: str, status: str = "PAUSED") -> str:
-    """إنشاء الإعلان النهائي المرتبط بالمنشور غير المنشور"""
-    url = f"{FB_API}/act_{account_id}/ads"
-    params = {
-        "access_token": access_token,
-        "name": f"Ad_{int(datetime.now().timestamp())}",
-        "adset_id": adset_id,
-        "creative": {"object_story_id": dark_post_id},
-        "status": status,
-    }
-    async with httpx.AsyncClient(timeout=30) as c:
-        resp = await c.post(url, params=params)
-        data = resp.json()
-        if "id" in data:
-            return data["id"]
-        else:
-            raise Exception(f"فشل إنشاء الإعلان: {data}")
-
-async def fb_update_ad_status(access_token: str, ad_id: str, status: str) -> bool:
-    """تحديث حالة الإعلان (ACTIVE أو PAUSED)"""
-    url = f"{FB_API}/{ad_id}"
-    params = {"access_token": access_token, "status": status}
-    async with httpx.AsyncClient(timeout=15) as c:
-        resp = await c.post(url, params=params)
-        return resp.status_code == 200
-
-# ─── دوال قاعدة البيانات (Redis) ─────────────────────
-async def db_user(r, ns, uid):
-    raw = await r.get(f"{ns}:u:{uid}")
-    return json.loads(raw) if raw else None
-
-async def db_save_user(r, ns, uid, data):
-    await r.set(f"{ns}:u:{uid}", json.dumps(data, ensure_ascii=False))
-
-async def db_ensure_user(r, ns, uid, username="", first_name=""):
-    user = await db_user(r, ns, uid)
-    if not user:
-        user = {
-            "uid": uid,
-            "un": username,
-            "fn": first_name,
-            "cn": "",
-            "joined": now_iso(),
-            "removed": False,
-            "sub": "",
-            "fb_token": "",  # سنخزن التوكن هنا مشفراً (اختياري)
-        }
-    else:
-        user["un"] = username
-        user["fn"] = first_name
-    await db_save_user(r, ns, uid, user)
-    return user
-
-def is_sub(user):
+def is_sub(uid: int) -> bool:
+    user = DB["users"].get(str(uid))
     if not user or user.get("removed"):
         return False
     sub = user.get("sub", "")
@@ -320,606 +104,686 @@ def is_sub(user):
     except:
         return False
 
-async def db_state(r, ns, uid):
-    raw = await r.get(f"{ns}:s:{uid}")
-    return json.loads(raw) if raw else {"st": ""}
-
-async def db_set_state(r, ns, uid, data):
-    await r.set(f"{ns}:s:{uid}", json.dumps(data, ensure_ascii=False))
-
-async def db_clear_state(r, ns, uid):
-    await r.delete(f"{ns}:s:{uid}")
-
-async def db_use_code(r, ns, code, uid):
-    raw = await r.get(f"{ns}:c:{code}")
-    if not raw:
-        return None
-    c = json.loads(raw)
-    if c.get("ub"):
-        return None
-    c["ub"] = uid
-    c["ua"] = now_iso()
-    await r.set(f"{ns}:c:{code}", json.dumps(c))
-    return int(c["h"])
-
-async def db_mk_code(r, ns, code, hours):
-    await r.set(f"{ns}:c:{code}", json.dumps({"h": hours, "ca": now_iso(), "ub": None, "ua": None}))
-
-async def db_set_sub(r, ns, uid, hours):
-    user = await db_user(r, ns, uid)
-    if not user:
-        user = {"uid": uid, "un": "", "fn": "", "cn": "", "joined": now_iso(), "removed": False, "sub": ""}
-    until = (datetime.now(timezone.utc) + timedelta(hours=hours)).isoformat(timespec="seconds")
-    user["sub"] = until
-    user["removed"] = False
-    await db_save_user(r, ns, uid, user)
-    return until
-
-async def db_save_ad(r, ns, uid, ad_data):
-    """حفظ بيانات الإعلان المنشأ للمستخدم"""
-    await r.set(f"{ns}:ad:{uid}", json.dumps(ad_data, ensure_ascii=False))
-
-async def db_get_ad(r, ns, uid):
-    raw = await r.get(f"{ns}:ad:{uid}")
-    return json.loads(raw) if raw else None
-
-async def db_delete_ad(r, ns, uid):
-    await r.delete(f"{ns}:ad:{uid}")
-
-async def db_inc_stat(r, ns, key, amount=1):
-    await r.incrby(f"{ns}:st:{key}", amount)
-
-async def db_get_stat(r, ns, key):
-    val = await r.get(f"{ns}:st:{key}")
-    return int(val) if val else 0
-
-# ─── الصفحة الرئيسية ──────────────────────────────────
-async def send_home(r, ns, cid, uid, mid=0):
-    user = await db_user(r, ns, uid)
-    subscribed = is_sub(user)
-    name = (user.get("cn") or user.get("fn") or "مستخدم") if user else "مستخدم"
-    status = "✅ مشترك" if subscribed else "❌ غير مشترك"
-    text = f"⚡ <b>{BOT_NAME}</b>\n\nمرحبًا {name}\nالحالة: {status}\n\nاختر من الأزرار."
-    kb = kb_main(subscribed)
-    if mid:
-        await edit_msg(cid, mid, text, kb)
+def ensure_user(uid: int, username: str = "", first_name: str = ""):
+    uid_str = str(uid)
+    if uid_str not in DB["users"]:
+        DB["users"][uid_str] = {
+            "uid": uid, "un": username, "fn": first_name,
+            "joined": now_iso(), "removed": False, "sub": ""
+        }
+        DB["stats"]["users"] = DB["stats"].get("users", 0) + 1
+        save_data()
     else:
-        await send_msg(cid, text, kb)
+        DB["users"][uid_str]["un"] = username
+        DB["users"][uid_str]["fn"] = first_name
+        save_data()
+    return DB["users"][uid_str]
 
-# ─── معالجة التحديثات ──────────────────────────────────
-async def handle_update(upd: dict):
-    try:
-        async with redis_client() as (r, ns):
-            if "callback_query" in upd:
-                await on_callback(r, ns, upd["callback_query"])
-            elif "message" in upd:
-                await on_message(r, ns, upd["message"])
-    except Exception as e:
-        logger.error(f"Update error: {e}\n{traceback.format_exc()}")
+# ─── أزرار ───────────────────────────────────────────────
+def kb_main(subscribed: bool):
+    rows = []
+    if subscribed:
+        rows.append([InlineKeyboardButton(text="🚀 إعلان جديد", callback_data="ad:start")])
+    rows.append([
+        InlineKeyboardButton(text="🎟 تفعيل كود", callback_data="redeem"),
+        InlineKeyboardButton(text="🛠 دعم", url=SUPPORT_URL)
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
-# ─── معالجة الضغط على الأزرار ─────────────────────────
-async def on_callback(r, ns, cb):
-    try:
-        uid = cb["from"]["id"]
-        cid = cb["message"]["chat"]["id"]
-        mid = cb["message"]["message_id"]
-        data = cb["data"]
-        cbid = cb["id"]
-        state = await db_state(r, ns, uid)
-        current_state = state.get("st", "")
+def kb_gates():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🌑 Dark Post", callback_data="gate:dark_post"),
+         InlineKeyboardButton(text="🚀 Boost Post", callback_data="gate:boost_post")],
+        [InlineKeyboardButton(text="👍 Page Like", callback_data="gate:page_like"),
+         InlineKeyboardButton(text="🤝 Partner Ship", callback_data="gate:partner_ship")],
+        [InlineKeyboardButton(text="🎪 Event Campaign", callback_data="gate:event")],
+        [InlineKeyboardButton(text="🏠 الرئيسية", callback_data="home")]
+    ])
 
-        # ----- الرئيسية -----
-        if data == "home":
-            await db_clear_state(r, ns, uid)
-            await send_home(r, ns, cid, uid, mid)
-            await answer_cb(cbid)
-            return
+def kb_gender():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👨 ذكر", callback_data="gender:male"),
+         InlineKeyboardButton(text="👩 أنثى", callback_data="gender:female")],
+        [InlineKeyboardButton(text="👫 الكل", callback_data="gender:all")],
+        [InlineKeyboardButton(text="🏠 الرئيسية", callback_data="home")]
+    ])
 
-        if data == "back":
-            # رجوع للخطوة السابقة (حسب السياق)
-            if current_state.startswith("ad_"):
-                # نرجع خطوة واحدة
-                steps = ["token", "account", "page", "objective", "image", "text", "target_country", "target_age", "target_gender", "budget", "days", "review", "status"]
-                # نجد الخطوة الحالية ونرجع للتي قبلها
-                for i, step in enumerate(steps):
-                    if current_state == f"ad_{step}":
-                        if i > 0:
-                            prev = steps[i-1]
-                            state["st"] = f"ad_{prev}"
-                            await db_set_state(r, ns, uid, state)
-                            await send_msg(cid, f"🔙 عدنا إلى خطوة {prev}", kb_back())
-                            await answer_cb(cbid)
-                            return
-            await send_home(r, ns, cid, uid, mid)
-            await answer_cb(cbid)
-            return
+def kb_confirm():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ تأكيد", callback_data="confirm:yes"),
+         InlineKeyboardButton(text="❌ إلغاء", callback_data="confirm:no")],
+        [InlineKeyboardButton(text="🏠 الرئيسية", callback_data="home")]
+    ])
 
-        # ----- تفعيل كود -----
-        if data == "redeem":
-            await db_set_state(r, ns, uid, {"st": "redeem"})
-            await edit_msg(cid, mid, "🎟 أرسل كود التفعيل:", kb_home())
-            await answer_cb(cbid)
-            return
+def kb_back():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 رجوع", callback_data="back")]
+    ])
 
-        # ----- بدء إعلان جديد -----
-        if data == "ad:start":
-            user = await db_user(r, ns, uid)
-            if not is_sub(user):
-                await answer_cb(cbid, "❌ اشترك أولاً بكود Redeem", True)
-                return
-            # نطلب التوكن (إذا لم يكن محفوظاً)
-            fb_token = user.get("fb_token", "")
-            if fb_token:
-                state["st"] = "ad_account"
-                state["token"] = fb_token
-                await db_set_state(r, ns, uid, state)
-                await edit_msg(cid, mid, "✅ تم استخدام التوكن المحفوظ.\nأدخل Account ID (رقم الحساب الإعلاني):", kb_back())
-            else:
-                state["st"] = "ad_token"
-                await db_set_state(r, ns, uid, state)
-                await edit_msg(cid, mid, "🔑 أرسل Access Token الخاص بفيسبوك (طويل الصلاحية):", kb_back())
-            await answer_cb(cbid)
-            return
+def kb_home():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🏠 الرئيسية", callback_data="home")]
+    ])
 
-        # ----- اختيار الهدف (من الأزرار) -----
-        if data.startswith("obj:") and current_state == "ad_objective":
-            obj_key = data.split(":")[1]
-            if obj_key not in OBJECTIVE_IDS:
-                await answer_cb(cbid, "هدف غير صالح", True)
-                return
-            state["objective"] = obj_key
-            state["st"] = "ad_image"
-            await db_set_state(r, ns, uid, state)
-            await edit_msg(cid, mid, f"✅ الهدف: {OBJECTIVES[obj_key]}\n\n📸 الآن أرسل الصورة (JPG/PNG):", kb_back())
-            await answer_cb(cbid)
-            return
+def kb_admin():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎟 توليد كود", callback_data="admin:gen_code"),
+         InlineKeyboardButton(text="👤 تمديد مشترك", callback_data="admin:set_user")],
+        [InlineKeyboardButton(text="🗑 حذف مشترك", callback_data="admin:remove_user"),
+         InlineKeyboardButton(text="📢 رسالة جماعية", callback_data="admin:broadcast")],
+        [InlineKeyboardButton(text="🌐 إضافة بروكسيات", callback_data="admin:add_proxies"),
+         InlineKeyboardButton(text="📊 الإحصائيات", callback_data="admin:stats")],
+        [InlineKeyboardButton(text="🏠 خروج", callback_data="home")]
+    ])
 
-        # ----- اختيار الجنس -----
-        if data.startswith("gender:") and current_state == "ad_target_gender":
-            gender = data.split(":")[1]
-            state["gender"] = gender
-            state["st"] = "ad_budget"
-            await db_set_state(r, ns, uid, state)
-            await edit_msg(cid, mid, f"✅ الجنس: {gender}\n\n💰 الآن أدخل الميزانية اليومية (بالدولار، مثال 10):", kb_back())
-            await answer_cb(cbid)
-            return
-
-        # ----- تأكيد المراجعة -----
-        if data == "confirm:yes" and current_state == "ad_review":
-            state["st"] = "ad_status"
-            await db_set_state(r, ns, uid, state)
-            await edit_msg(cid, mid, "✅ تم التأكيد.\nاختر حالة التشغيل:", kb_ad_status())
-            await answer_cb(cbid)
-            return
-
-        if data == "confirm:no" and current_state == "ad_review":
-            await db_clear_state(r, ns, uid)
-            await edit_msg(cid, mid, "❌ تم الإلغاء.", kb_home())
-            await answer_cb(cbid)
-            return
-
-        # ----- اختيار حالة التشغيل (نشط/متوقف) -----
-        if data.startswith("status:") and current_state == "ad_status":
-            status = data.split(":")[1]
-            if status not in ["ACTIVE", "PAUSED"]:
-                await answer_cb(cbid, "حالة غير صالحة", True)
-                return
-            state["ad_status"] = status
-            await db_set_state(r, ns, uid, state)
-
-            # الآن نقوم بإنشاء الإعلان
-            await edit_msg(cid, mid, "⏳ جاري إنشاء الإعلان...")
-            try:
-                result = await create_facebook_ad(r, ns, uid, state)
-                if result["success"]:
-                    # حفظ بيانات الإعلان
-                    ad_data = {
-                        "ad_id": result["ad_id"],
-                        "campaign_id": result["campaign_id"],
-                        "adset_id": result["adset_id"],
-                        "status": status,
-                        "created_at": now_iso(),
-                        "details": {k: state.get(k) for k in ["objective", "daily_budget", "days", "target_country", "target_age", "gender"]}
-                    }
-                    await db_save_ad(r, ns, uid, ad_data)
-                    # عرض رسالة النجاح مع أزرار التحكم
-                    txt = (
-                        f"✅ <b>تم إنشاء الإعلان بنجاح!</b>\n\n"
-                        f"🆔 Ad ID: <code>{result['ad_id']}</code>\n"
-                        f"📊 الحالة: {status}\n"
-                        f"🎯 الهدف: {OBJECTIVES.get(state.get('objective'), '')}\n"
-                        f"💰 الميزانية: {state.get('daily_budget')}$/يوم\n"
-                        f"📅 المدة: {state.get('days')} أيام\n"
-                        f"🌍 الدولة: {state.get('target_country')}\n"
-                        f"👤 العمر: {state.get('target_age')}\n"
-                        f"⚧ الجنس: {state.get('gender')}"
-                    )
-                    await edit_msg(cid, mid, txt, kb_ad_controls(result["ad_id"], status))
-                    await db_clear_state(r, ns, uid)
-                else:
-                    await edit_msg(cid, mid, f"❌ فشل إنشاء الإعلان:\n{result['error']}", kb_home())
-            except Exception as e:
-                await edit_msg(cid, mid, f"❌ خطأ: {str(e)}", kb_home())
-            await answer_cb(cbid)
-            return
-
-        # ----- التحكم بالإعلان (إيقاف/تشغيل) -----
-        if data.startswith("ctrl:"):
-            parts = data.split(":")
-            if len(parts) != 3:
-                await answer_cb(cbid, "بيانات غير صالحة", True)
-                return
-            action = parts[1]  # pause أو resume
-            ad_id = parts[2]
-            user = await db_user(r, ns, uid)
-            token = user.get("fb_token", "")
-            if not token:
-                await answer_cb(cbid, "لا يوجد توكن مخزن", True)
-                return
-            new_status = "PAUSED" if action == "pause" else "ACTIVE"
-            success = await fb_update_ad_status(token, ad_id, new_status)
-            if success:
-                # تحديث الحالة في قاعدة البيانات
-                ad = await db_get_ad(r, ns, uid)
-                if ad:
-                    ad["status"] = new_status
-                    await db_save_ad(r, ns, uid, ad)
-                await edit_msg(cid, mid, f"✅ تم {'إيقاف' if action=='pause' else 'تشغيل'} الإعلان بنجاح.", kb_ad_controls(ad_id, new_status))
-            else:
-                await edit_msg(cid, mid, "❌ فشل تحديث حالة الإعلان.", kb_home())
-            await answer_cb(cbid)
-            return
-
-        # ----- أوامر المشرف (مختصرة) -----
-        if data.startswith("admin:"):
-            await handle_admin_callback(r, ns, uid, cid, mid, cbid, data, state)
-            return
-
-        # أي callback غير معالج
-        await answer_cb(cbid)
-
-    except Exception as e:
-        logger.error(f"Callback error: {e}\n{traceback.format_exc()}")
+# ─── Facebook API ────────────────────────────────────────
+async def fb_request(method: str, endpoint: str, data: dict = None) -> dict:
+    url = f"{FB_API}/{endpoint}"
+    async with aiohttp.ClientSession() as session:
         try:
-            await answer_cb(cbid, f"خطأ: {str(e)}", True)
+            if method == "GET":
+                async with session.get(url, params=data, timeout=15) as resp:
+                    return await resp.json()
+            else:
+                async with session.post(url, data=data, timeout=30) as resp:
+                    return await resp.json()
+        except Exception as e:
+            return {"error": {"message": str(e)}}
+
+async def fb_check_token(token: str) -> dict:
+    return await fb_request("GET", "me", {"access_token": token, "fields": "id,name"})
+
+async def fb_get_page_token(user_token: str, page_id: str) -> dict:
+    """⚡ تحويل User Token إلى Page Token"""
+    url = f"{FB_API}/{page_id}"
+    params = {
+        "fields": "access_token",
+        "access_token": user_token
+    }
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(url, params=params, timeout=15) as resp:
+                result = await resp.json()
+                if "access_token" in result:
+                    return {"ok": True, "page_token": result["access_token"]}
+                return {"ok": False, "error": result.get("error", {}).get("message", "Unknown")}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+async def fb_upload_image(token: str, page_id: str, image_bytes: bytes) -> dict:
+    url = f"{FB_API}/{page_id}/photos"
+    data = {"access_token": token, "published": "false"}
+    async with aiohttp.ClientSession() as session:
+        form = aiohttp.FormData()
+        form.add_field("source", image_bytes, filename="image.jpg", content_type="image/jpeg")
+        for k, v in data.items():
+            form.add_field(k, v)
+        try:
+            async with session.post(url, data=form, timeout=30) as resp:
+                result = await resp.json()
+                if "id" in result:
+                    return {"ok": True, "id": result["id"]}
+                return {"ok": False, "error": result.get("error", {}).get("message", "Unknown")}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+async def fb_create_dark_post(token: str, page_id: str, image_id: str, message: str, link: str = "") -> dict:
+    data = {
+        "access_token": token, "message": message,
+        "attached_media": f'[{{"media_fbid": "{image_id}"}}]',
+        "published": "false"
+    }
+    if link:
+        data["link"] = link
+    result = await fb_request("POST", f"{page_id}/feed", data)
+    return {"ok": "id" in result, "id": result.get("id"), "error": result.get("error", {}).get("message", "")}
+
+async def fb_create_campaign(token: str, acc_id: str, objective: str, budget: float) -> dict:
+    data = {
+        "access_token": token,
+        "name": f"Boost_{int(datetime.now().timestamp())}",
+        "objective": objective, "status": "PAUSED",
+        "special_ad_categories": "[]", "daily_budget": int(budget * 100)
+    }
+    result = await fb_request("POST", f"act_{acc_id}/campaigns", data)
+    return {"ok": "id" in result, "id": result.get("id"), "error": result.get("error", {}).get("message", "")}
+
+async def fb_create_adset(token: str, acc_id: str, camp_id: str, budget: float, targeting: dict, opt_goal: str = "REACH") -> dict:
+    data = {
+        "access_token": token,
+        "name": f"AdSet_{int(datetime.now().timestamp())}",
+        "campaign_id": camp_id, "daily_budget": int(budget * 100),
+        "targeting": json.dumps(targeting), "status": "PAUSED",
+        "billing_event": "IMPRESSIONS", "optimization_goal": opt_goal
+    }
+    result = await fb_request("POST", f"act_{acc_id}/adsets", data)
+    return {"ok": "id" in result, "id": result.get("id"), "error": result.get("error", {}).get("message", "")}
+
+async def fb_create_ad(token: str, acc_id: str, adset_id: str, creative: dict, status: str = "ACTIVE") -> dict:
+    data = {
+        "access_token": token,
+        "name": f"Ad_{int(datetime.now().timestamp())}",
+        "adset_id": adset_id, "creative": json.dumps(creative), "status": status
+    }
+    result = await fb_request("POST", f"act_{acc_id}/ads", data)
+    return {"ok": "id" in result, "id": result.get("id"), "error": result.get("error", {}).get("message", "")}
+
+# ─── Handlers ────────────────────────────────────────────
+@router.message(Command("start"))
+async def cmd_start(message: Message, state: FSMContext):
+    await state.clear()
+    uid = message.from_user.id
+    username = message.from_user.username or ""
+    first_name = message.from_user.first_name or ""
+    ensure_user(uid, username, first_name)
+    
+    subscribed = is_sub(uid)
+    name = first_name or "مستخدم"
+    status = "✅ مشترك" if subscribed else "❌ غير مشترك"
+    text = f"⚡ <b>🚀 BESHOY BOOST BOT</b>\n\nمرحبًا {name}\nالحالة: {status}\n\nاختر من الأزرار."
+    
+    await message.answer(text, reply_markup=kb_main(subscribed), parse_mode="HTML")
+
+@router.message(Command("beshoy"))
+async def cmd_admin(message: Message, state: FSMContext):
+    await state.set_state(AdStates.waiting_admin_password)
+    await message.answer("🔐 أدخل كلمة المرور:", reply_markup=kb_home())
+
+@router.message(AdStates.waiting_admin_password)
+async def process_admin_password(message: Message, state: FSMContext):
+    if message.text == ADMIN_PASS:
+        await state.clear()
+        await message.answer("✅ مرحباً مشرف!", reply_markup=kb_admin())
+    else:
+        await state.clear()
+        await message.answer("❌ كلمة مرور خاطئة", reply_markup=kb_home())
+
+@router.callback_query(F.data == "home")
+async def cb_home(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    uid = callback.from_user.id
+    subscribed = is_sub(uid)
+    name = callback.from_user.first_name or "مستخدم"
+    status = "✅ مشترك" if subscribed else "❌ غير مشترك"
+    text = f"⚡ <b>🚀 BESHOY BOOST BOT</b>\n\nمرحبًا {name}\nالحالة: {status}\n\nاختر من الأزرار."
+    
+    await callback.message.edit_text(text, reply_markup=kb_main(subscribed), parse_mode="HTML")
+    await callback.answer()
+
+@router.callback_query(F.data == "back")
+async def cb_back(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_text("🏠 عدت للرئيسية", reply_markup=kb_home())
+    await callback.answer()
+
+@router.callback_query(F.data == "redeem")
+async def cb_redeem(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(AdStates.waiting_redeem_code)
+    await callback.message.edit_text("🎟 أرسل كود التفعيل:", reply_markup=kb_home())
+    await callback.answer()
+
+@router.message(AdStates.waiting_redeem_code)
+async def process_redeem_code(message: Message, state: FSMContext):
+    code = message.text.strip()
+    code_data = DB["codes"].get(code)
+    
+    if not code_data or code_data.get("used_by"):
+        await state.clear()
+        await message.answer("❌ كود غير صالح أو مستخدم", reply_markup=kb_home())
+        return
+    
+    hours = int(code_data["hours"])
+    until = (datetime.now(timezone.utc) + timedelta(hours=hours)).isoformat(timespec="seconds")
+    
+    uid_str = str(message.from_user.id)
+    
+    # ✅ إصلاح الخطأ: إنشاء المستخدم لو مش موجود أصلاً
+    if uid_str not in DB["users"]:
+        DB["users"][uid_str] = {
+            "uid": message.from_user.id,
+            "un": message.from_user.username or "",
+            "fn": message.from_user.first_name or "",
+            "joined": now_iso(),
+            "removed": False,
+            "sub": ""
+        }
+        DB["stats"]["users"] = DB["stats"].get("users", 0) + 1
+    
+    DB["users"][uid_str]["sub"] = until
+    DB["users"][uid_str]["removed"] = False
+    DB["codes"][code]["used_by"] = message.from_user.id
+    DB["codes"][code]["used_at"] = now_iso()
+    save_data()
+    
+    await state.clear()
+    subscribed = is_sub(message.from_user.id)
+    await message.answer(f"✅ تم التفعيل حتى: {until}", reply_markup=kb_main(subscribed))
+
+@router.callback_query(F.data == "ad:start")
+async def cb_ad_start(callback: CallbackQuery, state: FSMContext):
+    uid = callback.from_user.id
+    if not is_sub(uid):
+        await callback.answer("❌ اشترك أولاً بكود Redeem", show_alert=True)
+        return
+    
+    await callback.message.edit_text("🚀 اختر البوابة الإعلانية:", reply_markup=kb_gates())
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("gate:"))
+async def cb_gate(callback: CallbackQuery, state: FSMContext):
+    gate = callback.data.split(":")[1]
+    await state.update_data(gate=gate)
+    await state.set_state(AdStates.waiting_token)
+    await callback.message.edit_text("🔑 أرسل Access Token الخاص بفيسبوك:", reply_markup=kb_back())
+    await callback.answer()
+
+@router.message(AdStates.waiting_token)
+async def process_token(message: Message, state: FSMContext):
+    token = message.text.strip()
+    info = await fb_check_token(token)
+    
+    if "id" not in info:
+        await state.clear()
+        await message.answer(f"❌ التوكن غير صالح: {info.get('error', {}).get('message', '')}", reply_markup=kb_home())
+        return
+    
+    await state.update_data(token=token)
+    await state.set_state(AdStates.waiting_account_id)
+    await message.answer("✅ تم التحقق من التوكن.\n🆔 أدخل Account ID:", reply_markup=kb_back())
+
+@router.message(AdStates.waiting_account_id)
+async def process_account_id(message: Message, state: FSMContext):
+    text = message.text.strip()
+    if not text.isdigit() or len(text) < 10 or len(text) > 20:
+        await message.answer("❌ Account ID غير صحيح (10-20 رقم)", reply_markup=kb_back())
+        return
+    
+    await state.update_data(account_id=text)
+    await state.set_state(AdStates.waiting_page_id)
+    await message.answer("✅ تم حفظ Account ID.\n📄 أدخل Page ID:", reply_markup=kb_back())
+
+@router.message(AdStates.waiting_page_id)
+async def process_page_id(message: Message, state: FSMContext):
+    text = message.text.strip()
+    if not text.isdigit():
+        await message.answer("❌ Page ID غير صحيح", reply_markup=kb_back())
+        return
+    
+    await state.update_data(page_id=text)
+    
+    # ⚡ تحويل User Token إلى Page Token تلقائياً
+    data = await state.get_data()
+    user_token = data.get("token")
+    page_result = await fb_get_page_token(user_token, text)
+    
+    if page_result.get("ok"):
+        await state.update_data(token=page_result["page_token"])
+        await message.answer("✅ تم الحصول على Page Token بنجاح!")
+    else:
+        await message.answer(
+            f"⚠️ فشل الحصول على Page Token: {page_result.get('error')}\n"
+            "تأكد أن التوكن لديه صلاحية pages_manage_posts"
+        )
+    
+    gate = data.get("gate")
+    
+    if gate == "dark_post":
+        await state.set_state(AdStates.waiting_image)
+        await message.answer("📸 أرسل الصورة:", reply_markup=kb_back())
+    elif gate == "boost_post":
+        await state.set_state(AdStates.waiting_post_id)
+        await message.answer("📝 أدخل Post ID:", reply_markup=kb_back())
+    elif gate == "page_like":
+        await state.set_state(AdStates.waiting_budget)
+        await message.answer("💰 أدخل الميزانية اليومية ($):", reply_markup=kb_back())
+    elif gate == "event":
+        await state.set_state(AdStates.waiting_event_name)
+        await message.answer("🎪 أدخل اسم الحدث:", reply_markup=kb_back())
+
+@router.message(AdStates.waiting_image)
+async def process_image(message: Message, state: FSMContext):
+    if not message.photo:
+        await message.answer("❌ أرسل صورة (JPG أو PNG).", reply_markup=kb_back())
+        return
+    
+    photo = message.photo[-1]
+    file = await bot.get_file(photo.file_id)
+    file_url = f"https://api.telegram.org/file/bot{TOKEN}/{file.file_path}"
+    
+    async with aiohttp.ClientSession() as session:
+        async with session.get(file_url) as resp:
+            image_bytes = await resp.read()
+    
+    data = await state.get_data()
+    result = await fb_upload_image(data["token"], data["page_id"], image_bytes)
+    
+    if not result.get("ok"):
+        await message.answer(f"❌ فشل رفع الصورة: {result.get('error')}", reply_markup=kb_home())
+        return
+    
+    await state.update_data(image_id=result["id"])
+    await state.set_state(AdStates.waiting_message)
+    await message.answer("✅ تم رفع الصورة.\n💬 أرسل النص الأساسي للإعلان:", reply_markup=kb_back())
+
+@router.message(AdStates.waiting_message)
+async def process_message_text(message: Message, state: FSMContext):
+    if len(message.text) < 5:
+        await message.answer("❌ النص قصير جداً (على الأقل 5 أحرف)", reply_markup=kb_back())
+        return
+    
+    await state.update_data(message=message.text)
+    await state.set_state(AdStates.waiting_link)
+    await message.answer("✅ تم حفظ النص.\n🔗 أرسل الرابط (اختياري) أو اكتب 'تخطي':", reply_markup=kb_back())
+
+@router.message(AdStates.waiting_link)
+async def process_link(message: Message, state: FSMContext):
+    link = "" if message.text.lower() in ["تخطي", "skip"] else message.text
+    await state.update_data(link=link)
+    await state.set_state(AdStates.waiting_country)
+    await message.answer("✅ تم.\n🌍 أدخل الدولة المستهدفة (رمز الدولة، مثل: EG, US, SA):", reply_markup=kb_back())
+
+@router.message(AdStates.waiting_country)
+async def process_country(message: Message, state: FSMContext):
+    text = message.text.strip().upper()
+    if len(text) != 2 or not text.isalpha():
+        await message.answer("❌ رمز الدولة يجب أن يكون حرفين (مثل EG)", reply_markup=kb_back())
+        return
+    
+    await state.update_data(country=text)
+    await state.set_state(AdStates.waiting_age)
+    await message.answer(f"✅ الدولة: {text}\n👤 أدخل الفئة العمرية (مثال: 18-65):", reply_markup=kb_back())
+
+@router.message(AdStates.waiting_age)
+async def process_age(message: Message, state: FSMContext):
+    text = message.text.strip()
+    import re
+    if not re.match(r'^\d{1,2}-\d{1,2}$', text):
+        await message.answer("❌ الصيغة غير صحيحة. استخدم 18-65 مثلاً.", reply_markup=kb_back())
+        return
+    
+    ages = text.split("-")
+    if int(ages[0]) < 13 or int(ages[1]) > 65 or int(ages[0]) >= int(ages[1]):
+        await message.answer("❌ عمر غير صحيح (13-65)", reply_markup=kb_back())
+        return
+    
+    await state.update_data(age=text)
+    await message.answer(f"✅ العمر: {text}\n⚧ اختر الجنس:", reply_markup=kb_gender())
+
+@router.callback_query(F.data.startswith("gender:"))
+async def cb_gender(callback: CallbackQuery, state: FSMContext):
+    gender = callback.data.split(":")[1]
+    await state.update_data(gender=gender)
+    await state.set_state(AdStates.waiting_budget)
+    await callback.message.edit_text(f"✅ الجنس: {gender}\n💰 أدخل الميزانية اليومية ($):", reply_markup=kb_back())
+    await callback.answer()
+
+@router.message(AdStates.waiting_post_id)
+async def process_post_id(message: Message, state: FSMContext):
+    if len(message.text) < 5:
+        await message.answer("❌ Post ID قصير جداً", reply_markup=kb_back())
+        return
+    
+    await state.update_data(post_id=message.text)
+    await state.set_state(AdStates.waiting_budget)
+    await message.answer("✅ تم حفظ Post ID.\n💰 أدخل الميزانية اليومية ($):", reply_markup=kb_back())
+
+@router.message(AdStates.waiting_event_name)
+async def process_event_name(message: Message, state: FSMContext):
+    if len(message.text) < 3:
+        await message.answer("❌ اسم الحدث قصير جداً", reply_markup=kb_back())
+        return
+    
+    await state.update_data(event_name=message.text)
+    await state.set_state(AdStates.waiting_event_desc)
+    await message.answer("✅ تم حفظ الاسم.\n📝 أدخل وصف الحدث:", reply_markup=kb_back())
+
+@router.message(AdStates.waiting_event_desc)
+async def process_event_desc(message: Message, state: FSMContext):
+    if len(message.text) < 10:
+        await message.answer("❌ وصف الحدث قصير جداً (على الأقل 10 أحرف)", reply_markup=kb_back())
+        return
+    
+    await state.update_data(event_desc=message.text)
+    await state.set_state(AdStates.waiting_event_start)
+    await message.answer("✅ تم حفظ الوصف.\n🕐 أدخل وقت البداية (YYYY-MM-DD HH:MM):", reply_markup=kb_back())
+
+@router.message(AdStates.waiting_event_start)
+async def process_event_start(message: Message, state: FSMContext):
+    await state.update_data(event_start=message.text)
+    await state.set_state(AdStates.waiting_event_end)
+    await message.answer("✅ تم حفظ البداية.\n🕐 أدخل وقت النهاية (YYYY-MM-DD HH:MM):", reply_markup=kb_back())
+
+@router.message(AdStates.waiting_event_end)
+async def process_event_end(message: Message, state: FSMContext):
+    await state.update_data(event_end=message.text)
+    await state.set_state(AdStates.waiting_budget)
+    await message.answer("✅ تم حفظ النهاية.\n💰 أدخل الميزانية اليومية ($):", reply_markup=kb_back())
+
+@router.message(AdStates.waiting_budget)
+async def process_budget(message: Message, state: FSMContext):
+    try:
+        budget = float(message.text)
+        if budget < 1 or budget > 10000:
+            raise ValueError
+    except:
+        await message.answer("❌ الميزانية يجب أن تكون رقماً بين 1 و 10000", reply_markup=kb_back())
+        return
+    
+    await state.update_data(budget=budget)
+    await state.set_state(AdStates.waiting_days)
+    await message.answer(f"✅ الميزانية: {budget}$/يوم\n📅 أدخل عدد الأيام (1-365):", reply_markup=kb_back())
+
+@router.message(AdStates.waiting_days)
+async def process_days(message: Message, state: FSMContext):
+    try:
+        days = int(message.text)
+        if days < 1 or days > 365:
+            raise ValueError
+    except:
+        await message.answer("❌ يجب أن يكون عدد الأيام بين 1 و 365", reply_markup=kb_back())
+        return
+    
+    await state.update_data(days=days)
+    data = await state.get_data()
+    
+    summary = f"📋 <b>مراجعة البيانات</b>\n━━━━━━━━━━━━━━━━━━━━\n"
+    summary += f"🔑 التوكن: {data.get('token', '')[:10]}...\n"
+    summary += f"🆔 Account: {data.get('account_id')}\n"
+    summary += f"📄 Page: {data.get('page_id')}\n"
+    
+    gate = data.get("gate")
+    if gate == "dark_post":
+        summary += f"🖼 الصورة: تم رفعها\n"
+        summary += f"📝 النص: {data.get('message', '')[:30]}...\n"
+        summary += f"🔗 الرابط: {data.get('link') or 'بدون'}\n"
+        summary += f"🌍 الدولة: {data.get('country')}\n"
+        summary += f"👤 العمر: {data.get('age')}\n"
+        summary += f"⚧ الجنس: {data.get('gender')}\n"
+    elif gate == "boost_post":
+        summary += f"📝 Post ID: {data.get('post_id')}\n"
+    elif gate == "event":
+        summary += f"🎪 الحدث: {data.get('event_name')}\n"
+        summary += f"🕐 البداية: {data.get('event_start')}\n"
+        summary += f"🕐 النهاية: {data.get('event_end')}\n"
+    
+    summary += f"💰 الميزانية: {data.get('budget')}$/يوم\n"
+    summary += f"📅 المدة: {data.get('days')} أيام\n"
+    summary += f"━━━━━━━━━━━━━━━━━━━━\n"
+    summary += f"هل البيانات صحيحة؟"
+    
+    await message.answer(summary, reply_markup=kb_confirm(), parse_mode="HTML")
+
+@router.callback_query(F.data == "confirm:yes")
+async def cb_confirm_yes(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_text("⏳ جاري إنشاء الإعلان...")
+    
+    data = await state.get_data()
+    gate = data.get("gate")
+    token = data.get("token")
+    acc_id = data.get("account_id")
+    budget = data.get("budget")
+    
+    DB["stats"]["requests"] = DB["stats"].get("requests", 0) + 1
+    save_data()
+    
+    try:
+        if gate == "dark_post":
+            page_id = data.get("page_id")
+            image_id = data.get("image_id")
+            message = data.get("message")
+            link = data.get("link", "")
+            country = data.get("country")
+            age = data.get("age")
+            gender = data.get("gender")
+            
+            dark_post = await fb_create_dark_post(token, page_id, image_id, message, link)
+            if not dark_post.get("ok"):
+                raise Exception(dark_post.get("error"))
+            
+            campaign = await fb_create_campaign(token, acc_id, "OUTCOME_ENGAGEMENT", budget)
+            if not campaign.get("ok"):
+                raise Exception(campaign.get("error"))
+            
+            targeting = {
+                "geo_locations": {"countries": [country]},
+                "age_min": int(age.split("-")[0]),
+                "age_max": int(age.split("-")[1]),
+                "genders": [1] if gender == "male" else [2] if gender == "female" else [1, 2]
+            }
+            adset = await fb_create_adset(token, acc_id, campaign["id"], budget, targeting, "POST_ENGAGEMENT")
+            if not adset.get("ok"):
+                raise Exception(adset.get("error"))
+            
+            creative = {"object_story_id": dark_post["id"]}
+            ad = await fb_create_ad(token, acc_id, adset["id"], creative, "ACTIVE")
+            if not ad.get("ok"):
+                raise Exception(ad.get("error"))
+            
+            await callback.message.edit_text(f"✅ تم إنشاء الإعلان بنجاح!\n\n🆔 Ad ID: <code>{ad['id']}</code>", reply_markup=kb_home(), parse_mode="HTML")
+        
+    except Exception as e:
+        await callback.message.edit_text(f"❌ فشل إنشاء الإعلان:\n{str(e)}", reply_markup=kb_home())
+    
+    await state.clear()
+    await callback.answer()
+
+@router.callback_query(F.data == "confirm:no")
+async def cb_confirm_no(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_text("❌ تم الإلغاء.", reply_markup=kb_home())
+    await callback.answer()
+
+# ─── Admin Handlers ──────────────────────────────────────
+@router.callback_query(F.data.startswith("admin:"))
+async def cb_admin(callback: CallbackQuery, state: FSMContext):
+    action = callback.data.split(":")[1]
+    
+    if action == "stats":
+        users = DB["stats"].get("users", 0)
+        reqs = DB["stats"].get("requests", 0)
+        proxies = len(DB.get("proxies", []))
+        await callback.message.edit_text(f"📊 <b>الإحصائيات</b>\n\n👤 المستخدمون: {users}\n📋 الطلبات: {reqs}\n🌐 البروكسيات: {proxies}", reply_markup=kb_admin(), parse_mode="HTML")
+    
+    elif action == "gen_code":
+        await state.set_state(AdStates.waiting_admin_gen_code)
+        await callback.message.edit_text("🎟️ أدخل مدة الكود بالساعات:", reply_markup=kb_home())
+    
+    elif action == "set_user":
+        await state.set_state(AdStates.waiting_admin_set_user)
+        await callback.message.edit_text("👤 أدخل: uid | hours\nمثال: 123456789 | 168", reply_markup=kb_home())
+    
+    elif action == "remove_user":
+        await state.set_state(AdStates.waiting_admin_remove_user)
+        await callback.message.edit_text("🗑️ أدخل UID المستخدم:", reply_markup=kb_home())
+    
+    elif action == "broadcast":
+        await state.set_state(AdStates.waiting_admin_broadcast)
+        await callback.message.edit_text("📢 أدخل الرسالة الجماعية:", reply_markup=kb_home())
+    
+    elif action == "add_proxies":
+        await state.set_state(AdStates.waiting_admin_add_proxies)
+        await callback.message.edit_text("🌐 أرسل البروكسيات (كل بروكسي في سطر):", reply_markup=kb_home())
+    
+    await callback.answer()
+
+@router.message(AdStates.waiting_admin_gen_code)
+async def process_admin_gen_code(message: Message, state: FSMContext):
+    try:
+        hours = int(message.text)
+        code = gen_code()
+        DB["codes"][code] = {"hours": hours, "created_at": now_iso(), "used_by": None, "used_at": None}
+        save_data()
+        await message.answer(f"✅ الكود:\n<code>{code}</code>\nالمدة: {hours} ساعة", reply_markup=kb_admin(), parse_mode="HTML")
+    except:
+        await message.answer("❌ رقم ساعات غير صحيح", reply_markup=kb_admin())
+    await state.clear()
+
+@router.message(AdStates.waiting_admin_set_user)
+async def process_admin_set_user(message: Message, state: FSMContext):
+    parts = message.text.split("|")
+    if len(parts) != 2:
+        await message.answer("❌ الصيغة: uid | hours", reply_markup=kb_admin())
+        await state.clear()
+        return
+    
+    try:
+        uid = int(parts[0].strip())
+        hours = int(parts[1].strip())
+        until = (datetime.now(timezone.utc) + timedelta(hours=hours)).isoformat(timespec="seconds")
+        
+        uid_str = str(uid)
+        if uid_str not in DB["users"]:
+            DB["users"][uid_str] = {"uid": uid, "un": "", "fn": "", "joined": now_iso(), "removed": False, "sub": ""}
+        
+        DB["users"][uid_str]["sub"] = until
+        DB["users"][uid_str]["removed"] = False
+        save_data()
+        
+        await message.answer(f"✅ تم تمديد {uid} حتى {until}", reply_markup=kb_admin())
+    except:
+        await message.answer("❌ بيانات غير صحيحة", reply_markup=kb_admin())
+    await state.clear()
+
+@router.message(AdStates.waiting_admin_remove_user)
+async def process_admin_remove_user(message: Message, state: FSMContext):
+    try:
+        uid = int(message.text)
+        uid_str = str(uid)
+        if uid_str in DB["users"]:
+            DB["users"][uid_str]["removed"] = True
+            save_data()
+        await message.answer("✅ تم حذف المستخدم", reply_markup=kb_admin())
+    except:
+        await message.answer("❌ UID غير صحيح", reply_markup=kb_admin())
+    await state.clear()
+
+@router.message(AdStates.waiting_admin_broadcast)
+async def process_admin_broadcast(message: Message, state: FSMContext):
+    success = 0
+    for uid_str in DB["users"]:
+        try:
+            await bot.send_message(int(uid_str), f"📢 رسالة من الإدارة:\n\n{message.text}")
+            success += 1
         except:
             pass
+    await message.answer(f"✅ تم الإرسال لـ {success} مستخدم", reply_markup=kb_admin())
+    await state.clear()
 
-# ─── دالة إنشاء الإعلان الفعلية ──────────────────────
-async def create_facebook_ad(r, ns, uid, state) -> dict:
-    """إنشاء حملة + مجموعة إعلانات + إعلان باستخدام البيانات في state"""
-    try:
-        token = state.get("token")
-        account_id = state.get("account_id")
-        page_id = state.get("page_id")
-        objective = state.get("objective")
-        image_id = state.get("image_id")
-        message = state.get("ad_text")
-        headline = state.get("headline")
-        description = state.get("description")
-        country = state.get("target_country")
-        age_min, age_max = state.get("target_age").split("-")
-        gender = state.get("gender")
-        daily_budget = float(state.get("daily_budget"))
-        days = int(state.get("days"))
-        ad_status = state.get("ad_status")
+@router.message(AdStates.waiting_admin_add_proxies)
+async def process_admin_add_proxies(message: Message, state: FSMContext):
+    lines = [x.strip() for x in message.text.splitlines() if x.strip() and not x.startswith("#")]
+    if "proxies" not in DB:
+        DB["proxies"] = []
+    DB["proxies"].extend(lines)
+    save_data()
+    await message.answer(f"✅ تمت إضافة {len(lines)} بروكسي", reply_markup=kb_admin())
+    await state.clear()
 
-        # إنشاء المنشور غير المنشور (Dark Post)
-        dark_post_id = await fb_create_dark_post(token, page_id, image_id, message, headline, description)
-
-        # إنشاء الحملة
-        campaign_id = await fb_create_campaign(token, account_id, objective, "PAUSED")  # نبدأ موقوفة
-
-        # إنشاء مجموعة إعلانات مع الاستهداف
-        targeting = {
-            "geo_locations": {"countries": [country]},
-            "age_min": int(age_min),
-            "age_max": int(age_max),
-            "genders": [1] if gender == "male" else [2] if gender == "female" else [1, 2]
-        }
-        adset_id = await fb_create_adset(token, account_id, campaign_id, daily_budget, targeting, "PAUSED")
-
-        # إنشاء الإعلان النهائي
-        ad_id = await fb_create_ad(token, account_id, adset_id, dark_post_id, ad_status)
-
-        return {
-            "success": True,
-            "ad_id": ad_id,
-            "campaign_id": campaign_id,
-            "adset_id": adset_id,
-        }
-    except Exception as e:
-        return {"success": False, "error": str(e)}
-
-# ─── معالجة الرسائل النصية والصور ──────────────────
-async def on_message(r, ns, msg):
-    try:
-        uid = msg["from"]["id"]
-        cid = msg["chat"]["id"]
-        text = msg.get("text", "").strip()
-        state = await db_state(r, ns, uid)
-        current_state = state.get("st", "")
-        user = await db_ensure_user(r, ns, uid, msg["from"].get("username", ""), msg["from"].get("first_name", ""))
-
-        # ----- /start -----
-        if text == "/start":
-            if not user.get("joined"):
-                await db_inc_stat(r, ns, "users")
-            await db_clear_state(r, ns, uid)
-            await send_home(r, ns, cid, uid)
-            return
-
-        # ----- /beshoy (لوحة المشرف) -----
-        if text == f"/{ADMIN_CMD}":
-            await db_set_state(r, ns, uid, {"st": "admin_pw"})
-            await send_msg(cid, "🔐 أدخل كلمة المرور:", kb_home())
-            return
-
-        # ----- كود التفعيل -----
-        if current_state == "redeem":
-            hours = await db_use_code(r, ns, text, uid)
-            if not hours:
-                await send_msg(cid, "❌ كود غير صالح أو مستخدم", kb_home())
-                return
-            until = await db_set_sub(r, ns, uid, hours)
-            await db_clear_state(r, ns, uid)
-            user = await db_user(r, ns, uid)
-            await send_msg(cid, f"✅ تم التفعيل حتى: {until}", kb_main(is_sub(user)))
-            return
-
-        # ----- إدخال Access Token -----
-        if current_state == "ad_token":
-            # نتحقق من صحة التوكن
-            try:
-                info = await fb_check_token(text)
-                if "id" not in info:
-                    await send_msg(cid, f"❌ التوكن غير صالح: {info.get('error', {}).get('message', 'خطأ')}", kb_home())
-                    return
-                # حفظ التوكن في user
-                user["fb_token"] = text
-                await db_save_user(r, ns, uid, user)
-                state["token"] = text
-                state["st"] = "ad_account"
-                await db_set_state(r, ns, uid, state)
-                await send_msg(cid, "✅ تم التحقق من التوكن.\nأدخل Account ID (رقم الحساب الإعلاني):", kb_back())
-            except Exception as e:
-                await send_msg(cid, f"❌ فشل التحقق: {str(e)}", kb_home())
-            return
-
-        # ----- Account ID -----
-        if current_state == "ad_account":
-            if not re.match(r'^\d{10,20}$', text):
-                await send_msg(cid, "❌ Account ID يجب أن يكون 10-20 رقماً", kb_home())
-                return
-            state["account_id"] = text
-            state["st"] = "ad_page"
-            await db_set_state(r, ns, uid, state)
-            await send_msg(cid, "✅ تم حفظ Account ID.\nأدخل Page ID (معرف الصفحة):", kb_back())
-            return
-
-        # ----- Page ID -----
-        if current_state == "ad_page":
-            if not re.match(r'^\d+$', text):
-                await send_msg(cid, "❌ Page ID يجب أن يكون أرقاماً فقط", kb_home())
-                return
-            state["page_id"] = text
-            state["st"] = "ad_objective"
-            await db_set_state(r, ns, uid, state)
-            await send_msg(cid, "✅ تم حفظ Page ID.\nاختر هدف الإعلان:", kb_objectives())
-            return
-
-        # ----- استقبال الصورة -----
-        if current_state == "ad_image":
-            if "photo" not in msg:
-                await send_msg(cid, "❌ أرسل صورة (JPG أو PNG).", kb_back())
-                return
-            # تحميل الصورة من تيليجرام
-            photo = msg["photo"][-1]
-            file_id = photo["file_id"]
-            # نستخدم getFile لتحميل الملف
-            file_info = await tg("getFile", {"file_id": file_id})
-            if not file_info.get("ok"):
-                await send_msg(cid, "❌ فشل تحميل الصورة", kb_home())
-                return
-            file_path = file_info["result"]["file_path"]
-            file_url = f"https://api.telegram.org/file/bot{TOKEN}/{file_path}"
-            async with httpx.AsyncClient() as c:
-                resp = await c.get(file_url)
-                if resp.status_code != 200:
-                    await send_msg(cid, "❌ فشل تنزيل الصورة", kb_home())
-                    return
-                image_bytes = resp.content
-
-            # رفع الصورة إلى فيسبوك
-            try:
-                image_id = await fb_upload_image(state["token"], state["page_id"], image_bytes)
-                state["image_id"] = image_id
-                state["st"] = "ad_text"
-                await db_set_state(r, ns, uid, state)
-                await send_msg(cid, "✅ تم رفع الصورة.\nالآن أرسل النص الأساسي للإعلان (Primary Text):", kb_back())
-            except Exception as e:
-                await send_msg(cid, f"❌ فشل رفع الصورة: {str(e)}", kb_home())
-            return
-
-        # ----- نص الإعلان -----
-        if current_state == "ad_text":
-            if len(text) < 5:
-                await send_msg(cid, "❌ النص قصير جداً (على الأقل 5 أحرف)", kb_back())
-                return
-            state["ad_text"] = text
-            state["st"] = "ad_headline"
-            await db_set_state(r, ns, uid, state)
-            await send_msg(cid, "✅ تم حفظ النص.\nأرسل العنوان الرئيسي (Headline) أو اكتب 'تخطي':", kb_back())
-            return
-
-        # ----- Headline و Description -----
-        if current_state == "ad_headline":
-            if text.lower() != "تخطي":
-                state["headline"] = text
-                state["st"] = "ad_description"
-                await db_set_state(r, ns, uid, state)
-                await send_msg(cid, "✅ تم حفظ العنوان.\nأرسل وصف إضافي (Description) أو 'تخطي':", kb_back())
-            else:
-                state["headline"] = ""
-                state["st"] = "ad_target_country"
-                await db_set_state(r, ns, uid, state)
-                await send_msg(cid, "✅ تم التخطي.\nأدخل الدولة المستهدفة (رمز الدولة، مثل: EG, US, SA):", kb_back())
-            return
-
-        if current_state == "ad_description":
-            if text.lower() != "تخطي":
-                state["description"] = text
-            else:
-                state["description"] = ""
-            state["st"] = "ad_target_country"
-            await db_set_state(r, ns, uid, state)
-            await send_msg(cid, "✅ تم.\nأدخل الدولة المستهدفة (رمز الدولة، مثل: EG, US, SA):", kb_back())
-            return
-
-        # ----- الدولة -----
-        if current_state == "ad_target_country":
-            if len(text) != 2 or not text.isalpha():
-                await send_msg(cid, "❌ رمز الدولة يجب أن يكون حرفين (مثل EG)", kb_back())
-                return
-            state["target_country"] = text.upper()
-            state["st"] = "ad_target_age"
-            await db_set_state(r, ns, uid, state)
-            await send_msg(cid, "✅ الدولة: " + text.upper() + "\nأدخل الفئة العمرية (مثال: 18-65):", kb_back())
-            return
-
-        # ----- العمر -----
-        if current_state == "ad_target_age":
-            if not re.match(r'^\d{1,2}-\d{1,2}$', text):
-                await send_msg(cid, "❌ الصيغة غير صحيحة. استخدم 18-65 مثلاً.", kb_back())
-                return
-            ages = text.split("-")
-            if int(ages[0]) < 13 or int(ages[1]) > 65 or int(ages[0]) >= int(ages[1]):
-                await send_msg(cid, "❌ عمر غير صحيح (13-65)", kb_back())
-                return
-            state["target_age"] = text
-            state["st"] = "ad_target_gender"
-            await db_set_state(r, ns, uid, state)
-            await send_msg(cid, "✅ العمر: " + text + "\nاختر الجنس:", kb_gender())
-            return
-
-        # ----- الميزانية -----
-        if current_state == "ad_budget":
-            try:
-                budget = float(text)
-                if budget < 1 or budget > 10000:
-                    raise ValueError
-            except:
-                await send_msg(cid, "❌ الميزانية يجب أن تكون رقماً بين 1 و 10000", kb_back())
-                return
-            state["daily_budget"] = budget
-            state["st"] = "ad_days"
-            await db_set_state(r, ns, uid, state)
-            await send_msg(cid, f"✅ الميزانية: {budget}$/يوم\nأدخل عدد الأيام (1-365):", kb_back())
-            return
-
-        # ----- عدد الأيام -----
-        if current_state == "ad_days":
-            try:
-                days = int(text)
-                if days < 1 or days > 365:
-                    raise ValueError
-            except:
-                await send_msg(cid, "❌ يجب أن يكون عدد الأيام بين 1 و 365", kb_back())
-                return
-            state["days"] = days
-            state["st"] = "ad_review"
-            await db_set_state(r, ns, uid, state)
-
-            # عرض مراجعة
-            review = (
-                f"📋 <b>مراجعة البيانات</b>\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"🔑 التوكن: {state.get('token', '')[:10]}...\n"
-                f"🆔 Account: {state.get('account_id')}\n"
-                f"📄 Page: {state.get('page_id')}\n"
-                f"🎯 الهدف: {OBJECTIVES.get(state.get('objective'), '')}\n"
-                f"🖼 الصورة: تم رفعها\n"
-                f"📝 النص: {state.get('ad_text', '')[:30]}...\n"
-                f"📌 العنوان: {state.get('headline', 'بدون')}\n"
-                f"🌍 الدولة: {state.get('target_country')}\n"
-                f"👤 العمر: {state.get('target_age')}\n"
-                f"⚧ الجنس: {state.get('gender')}\n"
-                f"💰 الميزانية: {state.get('daily_budget')}$/يوم\n"
-                f"📅 المدة: {days} أيام\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"هل البيانات صحيحة؟"
-            )
-            await send_msg(cid, review, kb_confirm())
-            return
-
-        # ----- كلمة مرور المشرف -----
-        if current_state == "admin_pw":
-            if text != ADMIN_PASS:
-                await send_msg(cid, "❌ كلمة مرور خاطئة", kb_home())
-                return
-            await db_clear_state(r, ns, uid)
-            await send_msg(cid, "✅ مرحباً مشرف!", kb_admin())
-            return
-
-        # ----- أوامر المشرف النصية -----
-        if current_state.startswith("admin_"):
-            await handle_admin_message(r, ns, uid, cid, text, state)
-            return
-
-        # أي رسالة أخرى → الرئيسية
-        await send_home(r, ns, cid, uid)
-
-    except Exception as e:
-        logger.error(f"Message error: {e}\n{traceback.format_exc()}")
-        try:
-            await send_msg(cid, f"❌ خطأ: {str(e)}", kb_home())
-        except:
-            pass
-
-# ─── دوال المشرف (مختصرة) ──────────────────────────
-async def handle_admin_callback(r, ns, uid, cid, mid, cbid, data, state):
-    # فقط استجابة سريعة للأزرار (تطوير لاحق)
-    await answer_cb(cbid, "جاري التطوير...", False)
-
-async def handle_admin_message(r, ns, uid, cid, text, state):
-    # تطوير لاحق
-    await send_msg(cid, "وظيفة المشرف قيد التطوير", kb_admin())
-
-# ─── نقاط نهاية FastAPI ──────────────────────────────
-@app.post("/")
-async def root(request: Request):
-    body = await request.json()
-    if "update_id" in body:
-        await handle_update(body)
-        return {"ok": True}
-    return {"status": "running", "bot": BOT_NAME}
-
-@app.post("/webhook")
-async def webhook(request: Request):
-    body = await request.json()
-    payload = body.get("payload", body)
-    if "update_id" in payload:
-        await handle_update(payload)
-    return {"ok": True}
-
-class SetupReq(BaseModel):
-    webhook_url: str = Field("", description="Webhook URL to register with Telegram")
-
-class SetupRes(BaseModel):
-    success: bool
-    message: str
-    bot_info: dict = {}
-
-@app.post("/setup", response_model=SetupRes)
-async def setup(req: SetupReq):
-    if not TOKEN:
-        return SetupRes(success=False, message="TELEGRAM_BOT_TOKEN not set")
-    if req.webhook_url:
-        r = await tg("setWebhook", {"url": req.webhook_url})
-        return SetupRes(success=r.get("ok", False), message=str(r.get("description", "")), bot_info=r)
-    r = await tg("deleteWebhook", {})
-    info = await tg("getMe", {})
-    return SetupRes(success=r.get("ok", False), message="Webhook removed", bot_info=info.get("result", {}))
+# ─── Main ────────────────────────────────────────────────
+async def main():
+    logger.info("🚀 Starting BESHOY BOT (aiogram 3 + JSON)")
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    run_service(app)
+    import asyncio
+    asyncio.run(main())

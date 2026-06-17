@@ -1,7 +1,7 @@
 """
 BESHOY BOT - النسخة الكاملة
-aiogram 3 + JSON (بدون Redis)
-مع أزرار ملوّنة وإصلاح مشكلة Invalid parameter في Dark Post
+aiogram 3.20+ + JSON (بدون Redis)
+مع أزرار ملوّنة (Bot API 9.4)
 """
 import os
 import json
@@ -12,7 +12,6 @@ import aiohttp
 import re
 from datetime import datetime, timezone, timedelta
 from typing import Optional
-from pydantic import ConfigDict
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.filters import Command
 from aiogram.types import (
@@ -160,33 +159,31 @@ def get_random_proxy() -> dict:
     proxy_str = secrets.choice(DB["proxies"])
     return parse_proxy(proxy_str)
 
-# ─── أزرار ملوّنة ────────────────────────────────────────
-class StyledButton(InlineKeyboardButton):
-    model_config = ConfigDict(extra='allow', populate_by_name=True)
-    style: Optional[str] = None  # primary, success, danger, secondary
-
+# ─── دالة الأزرار (Bot API 9.4 - القيم الصحيحة فقط) ──────
+# القيم الصحيحة: "primary" (أزرق) | "success" (أخضر) | "danger" (أحمر)
+# "secondary" غير موجودة في Telegram API وتسبب خطأ
 def _btn(text: str, *,
          callback_data: Optional[str] = None,
          url: Optional[str] = None,
-         style: Optional[str] = None,
-         **kw) -> StyledButton:
-    kwargs = {'text': text}
+         style: Optional[str] = None) -> InlineKeyboardButton:
+    kwargs = {"text": text}
     if callback_data is not None:
-        kwargs['callback_data'] = callback_data
+        kwargs["callback_data"] = callback_data
     if url is not None:
-        kwargs['url'] = url
-    if style is not None:
-        kwargs['style'] = style
-    kwargs.update(kw)
-    return StyledButton(**kwargs)
+        kwargs["url"] = url
+    # فقط القيم الصحيحة المدعومة من Telegram
+    if style in ("primary", "success", "danger"):
+        kwargs["style"] = style
+    return InlineKeyboardButton(**kwargs)
 
+# ─── لوحات المفاتيح ──────────────────────────────────────
 def kb_main(subscribed: bool):
     rows = []
     if subscribed:
         rows.append([_btn("🚀 إعلان جديد", callback_data="ad:start", style="primary")])
     rows.append([
         _btn("🎟 تفعيل كود", callback_data="redeem", style="success"),
-        _btn("🛠 دعم", url=SUPPORT_URL, style="secondary")
+        _btn("🛠 دعم", url=SUPPORT_URL)          # بدون style لأن "secondary" غير صالحة
     ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -215,14 +212,14 @@ def kb_proxy_choice():
     return InlineKeyboardMarkup(inline_keyboard=[
         [_btn("🔄 تلقائي من البوت", callback_data="proxy:auto", style="primary")],
         [_btn("✋ إدخال يدوي", callback_data="proxy:manual", style="primary")],
-        [_btn("❌ بدون بروكسي", callback_data="proxy:none", style="secondary")],
+        [_btn("❌ بدون بروكسي", callback_data="proxy:none")],   # بدون style
         [_btn("🏠 الرئيسية", callback_data="home", style="danger")]
     ])
 
 def kb_ad_status():
     return InlineKeyboardMarkup(inline_keyboard=[
         [_btn("▶️ نشط (ACTIVE)", callback_data="status:ACTIVE", style="success")],
-        [_btn("⏸ متوقف (PAUSED)", callback_data="status:PAUSED", style="secondary")],
+        [_btn("⏸ متوقف (PAUSED)", callback_data="status:PAUSED")],  # بدون style
         [_btn("🏠 الرئيسية", callback_data="home", style="danger")]
     ])
 
@@ -238,18 +235,18 @@ def kb_confirm():
     return InlineKeyboardMarkup(inline_keyboard=[
         [_btn("✅ تأكيد", callback_data="confirm:yes", style="success"),
          _btn("❌ إلغاء", callback_data="confirm:no", style="danger")],
-        [_btn("🏠 الرئيسية", callback_data="home", style="secondary")]
+        [_btn("🏠 الرئيسية", callback_data="home")]   # بدون style
     ])
 
 def kb_back():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [_btn("🔙 رجوع", callback_data="back", style="secondary")],
+        [_btn("🔙 رجوع", callback_data="back")],      # بدون style
         [_btn("🏠 الرئيسية", callback_data="home", style="danger")]
     ])
 
 def kb_home():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [_btn("🏠 الرئيسية", callback_data="home", style="secondary")]
+        [_btn("🏠 الرئيسية", callback_data="home")]   # بدون style
     ])
 
 def kb_admin():
@@ -325,17 +322,12 @@ async def fb_create_dark_post(token: str, page_id: str, image_id: str, message: 
     return {"ok": "id" in result, "id": result.get("id"), "error": result.get("error", {}).get("message", "")}
 
 async def fb_create_campaign(token: str, acc_id: str, objective: str, budget: float, proxy: dict = None) -> dict:
-    """
-    إنشاء حملة إعلانية - تم إصلاح مشكلة Invalid parameter عبر إزالة special_ad_categories
-    واستخدام الهدف كما هو (POST_ENGAGEMENT, REACH ...) بدون تحويل
-    """
     data = {
         "access_token": token,
         "name": f"Boost_{int(datetime.now().timestamp())}",
-        "objective": objective,  # الهدف الأصلي مباشرة
+        "objective": objective,
         "status": "PAUSED",
         "daily_budget": int(budget * 100)
-        # تم حذف special_ad_categories
     }
     result = await fb_request("POST", f"act_{acc_id}/campaigns", data, proxy)
     return {"ok": "id" in result, "id": result.get("id"), "error": result.get("error", {}).get("message", "")}
@@ -534,9 +526,6 @@ async def process_page_id(message: Message, state: FSMContext):
 async def cb_objective(callback: CallbackQuery, state: FSMContext):
     objective = callback.data.split(":")[1]
     await state.update_data(objective=objective)
-
-    data = await state.get_data()
-    gate = data.get("gate")
 
     obj_names = {
         "POST_ENGAGEMENT": "👍 تفاعل المنشور",
@@ -818,7 +807,7 @@ async def cb_confirm_yes(callback: CallbackQuery, state: FSMContext):
     token = data.get("token")
     acc_id = data.get("account_id")
     budget = data.get("budget")
-    objective = data.get("objective", "POST_ENGAGEMENT")  # الهدف كما اختاره المستخدم
+    objective = data.get("objective", "POST_ENGAGEMENT")
     ad_status = data.get("ad_status", "ACTIVE")
     proxy = data.get("proxy")
 
@@ -835,12 +824,10 @@ async def cb_confirm_yes(callback: CallbackQuery, state: FSMContext):
             age = data.get("age")
             gender = data.get("gender")
 
-            # إنشاء المنشور المظلم
             dark_post = await fb_create_dark_post(token, page_id, image_id, message, link, proxy)
             if not dark_post.get("ok"):
                 raise Exception(dark_post.get("error"))
 
-            # إنشاء الحملة بالهدف الأصلي مباشرة
             campaign = await fb_create_campaign(token, acc_id, objective, budget, proxy)
             if not campaign.get("ok"):
                 raise Exception(campaign.get("error"))
@@ -991,7 +978,7 @@ async def process_admin_add_proxies(message: Message, state: FSMContext):
 
 # ─── Main ────────────────────────────────────────────────
 async def main():
-    logger.info("🚀 Starting BESHOY BOT (aiogram 3 + JSON)")
+    logger.info("🚀 Starting BESHOY BOT (aiogram 3.20+ + JSON)")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":

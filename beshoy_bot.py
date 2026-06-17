@@ -1,5 +1,5 @@
 """
-BESHOY BOT - النسخة البسيطة جداً
+BESHOY BOT - النسخة الكاملة
 aiogram 3 + JSON (بدون Redis)
 """
 import os
@@ -8,6 +8,7 @@ import secrets
 import string
 import logging
 import aiohttp
+import re
 from datetime import datetime, timezone, timedelta
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.filters import Command
@@ -64,9 +65,9 @@ class AdStates(StatesGroup):
     waiting_token = State()
     waiting_account_id = State()
     waiting_page_id = State()
+    waiting_objective = State()
     waiting_image = State()
     waiting_message = State()
-    waiting_link = State()
     waiting_country = State()
     waiting_age = State()
     waiting_post_id = State()
@@ -76,6 +77,9 @@ class AdStates(StatesGroup):
     waiting_event_end = State()
     waiting_budget = State()
     waiting_days = State()
+    waiting_proxy_choice = State()  # ⚡ اختيار البروكسي
+    waiting_proxy_manual = State()  # ⚡ إدخال بروكسي يدوي
+    waiting_ad_status = State()  # ⚡ حالة الإعلان
     waiting_redeem_code = State()
     waiting_admin_password = State()
     waiting_admin_gen_code = State()
@@ -119,6 +123,50 @@ def ensure_user(uid: int, username: str = "", first_name: str = ""):
         save_data()
     return DB["users"][uid_str]
 
+def parse_proxy(proxy_str: str) -> dict:
+    """⚡ معالجة البروكسي بجميع الأشكال"""
+    proxy_str = proxy_str.strip()
+    
+    # صيغة: ip:port:user:pass
+    if proxy_str.count(":") == 3:
+        parts = proxy_str.split(":")
+        return {
+            "http": f"http://{parts[2]}:{parts[3]}@{parts[0]}:{parts[1]}",
+            "https": f"http://{parts[2]}:{parts[3]}@{parts[0]}:{parts[1]}"
+        }
+    
+    # صيغة: ip:port
+    elif proxy_str.count(":") == 1:
+        parts = proxy_str.split(":")
+        return {
+            "http": f"http://{parts[0]}:{parts[1]}",
+            "https": f"http://{parts[0]}:{parts[1]}"
+        }
+    
+    # صيغة: user:pass@ip:port
+    elif "@" in proxy_str:
+        return {
+            "http": f"http://{proxy_str}",
+            "https": f"http://{proxy_str}"
+        }
+    
+    # صيغة: http://ip:port
+    elif proxy_str.startswith("http"):
+        return {
+            "http": proxy_str,
+            "https": proxy_str
+        }
+    
+    return None
+
+def get_random_proxy() -> dict:
+    """⚡ الحصول على بروكسي عشوائي من القائمة"""
+    if not DB.get("proxies"):
+        return None
+    
+    proxy_str = secrets.choice(DB["proxies"])
+    return parse_proxy(proxy_str)
+
 # ─── أزرار ───────────────────────────────────────────────
 def kb_main(subscribed: bool):
     rows = []
@@ -140,6 +188,35 @@ def kb_gates():
         [InlineKeyboardButton(text="🏠 الرئيسية", callback_data="home")]
     ])
 
+def kb_objective():
+    """⚡ أزرار اختيار هدف الإعلان"""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👍 تفاعل المنشور", callback_data="obj:POST_ENGAGEMENT")],
+        [InlineKeyboardButton(text="👁 الوصول", callback_data="obj:REACH")],
+        [InlineKeyboardButton(text="👥 زيارات الصفحة", callback_data="obj:PAGE_LIKES")],
+        [InlineKeyboardButton(text="🔗 النقرات على الرابط", callback_data="obj:LINK_CLICKS")],
+        [InlineKeyboardButton(text="📹 مشاهدات الفيديو", callback_data="obj:VIDEO_VIEWS")],
+        [InlineKeyboardButton(text="💬 رسائل", callback_data="obj:CONVERSATIONS")],
+        [InlineKeyboardButton(text="🏠 الرئيسية", callback_data="home")]
+    ])
+
+def kb_proxy_choice():
+    """⚡ أزرار اختيار البروكسي"""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 تلقائي من البوت", callback_data="proxy:auto")],
+        [InlineKeyboardButton(text="✋ إدخال يدوي", callback_data="proxy:manual")],
+        [InlineKeyboardButton(text="❌ بدون بروكسي", callback_data="proxy:none")],
+        [InlineKeyboardButton(text="🏠 الرئيسية", callback_data="home")]
+    ])
+
+def kb_ad_status():
+    """⚡ أزرار حالة الإعلان"""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="▶️ نشط (ACTIVE)", callback_data="status:ACTIVE")],
+        [InlineKeyboardButton(text="⏸ متوقف (PAUSED)", callback_data="status:PAUSED")],
+        [InlineKeyboardButton(text="🏠 الرئيسية", callback_data="home")]
+    ])
+
 def kb_gender():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="👨 ذكر", callback_data="gender:male"),
@@ -157,7 +234,8 @@ def kb_confirm():
 
 def kb_back():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔙 رجوع", callback_data="back")]
+        [InlineKeyboardButton(text="🔙 رجوع", callback_data="back")],
+        [InlineKeyboardButton(text="🏠 الرئيسية", callback_data="home")]
     ])
 
 def kb_home():
@@ -177,24 +255,24 @@ def kb_admin():
     ])
 
 # ─── Facebook API ────────────────────────────────────────
-async def fb_request(method: str, endpoint: str, data: dict = None) -> dict:
+async def fb_request(method: str, endpoint: str, data: dict = None, proxy: dict = None) -> dict:
     url = f"{FB_API}/{endpoint}"
     async with aiohttp.ClientSession() as session:
         try:
             if method == "GET":
-                async with session.get(url, params=data, timeout=15) as resp:
+                async with session.get(url, params=data, timeout=15, proxy=proxy.get("http") if proxy else None) as resp:
                     return await resp.json()
             else:
-                async with session.post(url, data=data, timeout=30) as resp:
+                async with session.post(url, data=data, timeout=30, proxy=proxy.get("http") if proxy else None) as resp:
                     return await resp.json()
         except Exception as e:
             return {"error": {"message": str(e)}}
 
-async def fb_check_token(token: str) -> dict:
-    return await fb_request("GET", "me", {"access_token": token, "fields": "id,name"})
+async def fb_check_token(token: str, proxy: dict = None) -> dict:
+    return await fb_request("GET", "me", {"access_token": token, "fields": "id,name"}, proxy)
 
-async def fb_get_page_token(user_token: str, page_id: str) -> dict:
-    """⚡ تحويل User Token إلى Page Token"""
+async def fb_get_page_token(user_token: str, page_id: str, proxy: dict = None) -> dict:
+    """⚡ تحويل User Token إلى Page Token تلقائياً"""
     url = f"{FB_API}/{page_id}"
     params = {
         "fields": "access_token",
@@ -202,7 +280,7 @@ async def fb_get_page_token(user_token: str, page_id: str) -> dict:
     }
     async with aiohttp.ClientSession() as session:
         try:
-            async with session.get(url, params=params, timeout=15) as resp:
+            async with session.get(url, params=params, timeout=15, proxy=proxy.get("http") if proxy else None) as resp:
                 result = await resp.json()
                 if "access_token" in result:
                     return {"ok": True, "page_token": result["access_token"]}
@@ -210,7 +288,7 @@ async def fb_get_page_token(user_token: str, page_id: str) -> dict:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
-async def fb_upload_image(token: str, page_id: str, image_bytes: bytes) -> dict:
+async def fb_upload_image(token: str, page_id: str, image_bytes: bytes, proxy: dict = None) -> dict:
     url = f"{FB_API}/{page_id}/photos"
     data = {"access_token": token, "published": "false"}
     async with aiohttp.ClientSession() as session:
@@ -219,7 +297,7 @@ async def fb_upload_image(token: str, page_id: str, image_bytes: bytes) -> dict:
         for k, v in data.items():
             form.add_field(k, v)
         try:
-            async with session.post(url, data=form, timeout=30) as resp:
+            async with session.post(url, data=form, timeout=30, proxy=proxy.get("http") if proxy else None) as resp:
                 result = await resp.json()
                 if "id" in result:
                     return {"ok": True, "id": result["id"]}
@@ -227,7 +305,7 @@ async def fb_upload_image(token: str, page_id: str, image_bytes: bytes) -> dict:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
-async def fb_create_dark_post(token: str, page_id: str, image_id: str, message: str, link: str = "") -> dict:
+async def fb_create_dark_post(token: str, page_id: str, image_id: str, message: str, link: str = "", proxy: dict = None) -> dict:
     data = {
         "access_token": token, "message": message,
         "attached_media": f'[{{"media_fbid": "{image_id}"}}]',
@@ -235,20 +313,20 @@ async def fb_create_dark_post(token: str, page_id: str, image_id: str, message: 
     }
     if link:
         data["link"] = link
-    result = await fb_request("POST", f"{page_id}/feed", data)
+    result = await fb_request("POST", f"{page_id}/feed", data, proxy)
     return {"ok": "id" in result, "id": result.get("id"), "error": result.get("error", {}).get("message", "")}
 
-async def fb_create_campaign(token: str, acc_id: str, objective: str, budget: float) -> dict:
+async def fb_create_campaign(token: str, acc_id: str, objective: str, budget: float, proxy: dict = None) -> dict:
     data = {
         "access_token": token,
         "name": f"Boost_{int(datetime.now().timestamp())}",
         "objective": objective, "status": "PAUSED",
         "special_ad_categories": "[]", "daily_budget": int(budget * 100)
     }
-    result = await fb_request("POST", f"act_{acc_id}/campaigns", data)
+    result = await fb_request("POST", f"act_{acc_id}/campaigns", data, proxy)
     return {"ok": "id" in result, "id": result.get("id"), "error": result.get("error", {}).get("message", "")}
 
-async def fb_create_adset(token: str, acc_id: str, camp_id: str, budget: float, targeting: dict, opt_goal: str = "REACH") -> dict:
+async def fb_create_adset(token: str, acc_id: str, camp_id: str, budget: float, targeting: dict, opt_goal: str = "REACH", proxy: dict = None) -> dict:
     data = {
         "access_token": token,
         "name": f"AdSet_{int(datetime.now().timestamp())}",
@@ -256,17 +334,26 @@ async def fb_create_adset(token: str, acc_id: str, camp_id: str, budget: float, 
         "targeting": json.dumps(targeting), "status": "PAUSED",
         "billing_event": "IMPRESSIONS", "optimization_goal": opt_goal
     }
-    result = await fb_request("POST", f"act_{acc_id}/adsets", data)
+    result = await fb_request("POST", f"act_{acc_id}/adsets", data, proxy)
     return {"ok": "id" in result, "id": result.get("id"), "error": result.get("error", {}).get("message", "")}
 
-async def fb_create_ad(token: str, acc_id: str, adset_id: str, creative: dict, status: str = "ACTIVE") -> dict:
+async def fb_create_ad(token: str, acc_id: str, adset_id: str, creative: dict, status: str = "ACTIVE", proxy: dict = None) -> dict:
     data = {
         "access_token": token,
         "name": f"Ad_{int(datetime.now().timestamp())}",
         "adset_id": adset_id, "creative": json.dumps(creative), "status": status
     }
-    result = await fb_request("POST", f"act_{acc_id}/ads", data)
+    result = await fb_request("POST", f"act_{acc_id}/ads", data, proxy)
     return {"ok": "id" in result, "id": result.get("id"), "error": result.get("error", {}).get("message", "")}
+
+async def fb_update_ad_status(token: str, ad_id: str, status: str, proxy: dict = None) -> dict:
+    """⚡ تغيير حالة الإعلان (ACTIVE/PAUSED)"""
+    data = {
+        "access_token": token,
+        "ad_status": status
+    }
+    result = await fb_request("POST", ad_id, data, proxy)
+    return {"ok": "id" in result, "error": result.get("error", {}).get("message", "")}
 
 # ─── Handlers ────────────────────────────────────────────
 @router.message(Command("start"))
@@ -337,7 +424,6 @@ async def process_redeem_code(message: Message, state: FSMContext):
     
     uid_str = str(message.from_user.id)
     
-    # ✅ إصلاح الخطأ: إنشاء المستخدم لو مش موجود أصلاً
     if uid_str not in DB["users"]:
         DB["users"][uid_str] = {
             "uid": message.from_user.id,
@@ -380,7 +466,12 @@ async def cb_gate(callback: CallbackQuery, state: FSMContext):
 @router.message(AdStates.waiting_token)
 async def process_token(message: Message, state: FSMContext):
     token = message.text.strip()
-    info = await fb_check_token(token)
+    
+    # ⚡ الحصول على البروكسي إن وجد
+    data = await state.get_data()
+    proxy = data.get("proxy")
+    
+    info = await fb_check_token(token, proxy)
     
     if "id" not in info:
         await state.clear()
@@ -411,34 +502,114 @@ async def process_page_id(message: Message, state: FSMContext):
     
     await state.update_data(page_id=text)
     
-    # ⚡ تحويل User Token إلى Page Token تلقائياً
+    # ⚡ الحصول على البروكسي
     data = await state.get_data()
+    proxy = data.get("proxy")
+    
+    # ⚡ تحويل User Token إلى Page Token تلقائياً
     user_token = data.get("token")
-    page_result = await fb_get_page_token(user_token, text)
+    page_result = await fb_get_page_token(user_token, text, proxy)
     
     if page_result.get("ok"):
         await state.update_data(token=page_result["page_token"])
-        await message.answer("✅ تم الحصول على Page Token بنجاح!")
     else:
         await message.answer(
             f"⚠️ فشل الحصول على Page Token: {page_result.get('error')}\n"
             "تأكد أن التوكن لديه صلاحية pages_manage_posts"
         )
+        return
     
+    # ⚡ اطلب هدف الإعلان
+    await state.set_state(AdStates.waiting_objective)
+    await message.answer("🎯 اختر هدف الإعلان:", reply_markup=kb_objective())
+
+@router.callback_query(F.data.startswith("obj:"))
+async def cb_objective(callback: CallbackQuery, state: FSMContext):
+    objective = callback.data.split(":")[1]
+    await state.update_data(objective=objective)
+    
+    data = await state.get_data()
+    gate = data.get("gate")
+    
+    obj_names = {
+        "POST_ENGAGEMENT": "👍 تفاعل المنشور",
+        "REACH": "👁 الوصول",
+        "PAGE_LIKES": "👥 زيارات الصفحة",
+        "LINK_CLICKS": "🔗 النقرات على الرابط",
+        "VIDEO_VIEWS": "📹 مشاهدات الفيديو",
+        "CONVERSATIONS": "💬 رسائل"
+    }
+    obj_name = obj_names.get(objective, objective)
+    
+    # ⚡ اطلب اختيار البروكسي
+    await state.set_state(AdStates.waiting_proxy_choice)
+    await callback.message.edit_text(f"✅ الهدف: {obj_name}\n\n🌐 اختر طريقة استخدام البروكسي:", reply_markup=kb_proxy_choice())
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("proxy:"))
+async def cb_proxy_choice(callback: CallbackQuery, state: FSMContext):
+    choice = callback.data.split(":")[1]
+    
+    if choice == "auto":
+        proxy = get_random_proxy()
+        if proxy:
+            await state.update_data(proxy=proxy)
+            await callback.message.edit_text("✅ تم اختيار بروكسي تلقائي من البوت", reply_markup=kb_back())
+        else:
+            await callback.message.edit_text("⚠️ لا توجد بروكسيات متاحة، سيتم المتابعة بدون بروكسي", reply_markup=kb_back())
+    elif choice == "manual":
+        await state.set_state(AdStates.waiting_proxy_manual)
+        await callback.message.edit_text("✋ أرسل البروكسي:\n\nالصيغ المدعومة:\n• ip:port\n• ip:port:user:pass\n• user:pass@ip:port\n• http://ip:port", reply_markup=kb_back())
+        await callback.answer()
+        return
+    elif choice == "none":
+        await state.update_data(proxy=None)
+        await callback.message.edit_text("✅ سيتم المتابعة بدون بروكسي", reply_markup=kb_back())
+    
+    data = await state.get_data()
     gate = data.get("gate")
     
     if gate == "dark_post":
         await state.set_state(AdStates.waiting_image)
-        await message.answer("📸 أرسل الصورة:", reply_markup=kb_back())
+        await callback.message.edit_text("📸 أرسل الصورة:", reply_markup=kb_back())
     elif gate == "boost_post":
         await state.set_state(AdStates.waiting_post_id)
-        await message.answer("📝 أدخل Post ID:", reply_markup=kb_back())
+        await callback.message.edit_text("📝 أدخل Post ID:", reply_markup=kb_back())
     elif gate == "page_like":
         await state.set_state(AdStates.waiting_budget)
-        await message.answer("💰 أدخل الميزانية اليومية ($):", reply_markup=kb_back())
+        await callback.message.edit_text("💰 أدخل الميزانية اليومية ($):", reply_markup=kb_back())
     elif gate == "event":
         await state.set_state(AdStates.waiting_event_name)
-        await message.answer("🎪 أدخل اسم الحدث:", reply_markup=kb_back())
+        await callback.message.edit_text("🎪 أدخل اسم الحدث:", reply_markup=kb_back())
+    
+    await callback.answer()
+
+@router.message(AdStates.waiting_proxy_manual)
+async def process_proxy_manual(message: Message, state: FSMContext):
+    proxy_str = message.text.strip()
+    proxy = parse_proxy(proxy_str)
+    
+    if not proxy:
+        await message.answer("❌ صيغة البروكسي غير صحيحة", reply_markup=kb_back())
+        return
+    
+    await state.update_data(proxy=proxy)
+    
+    data = await state.get_data()
+    gate = data.get("gate")
+    
+    if gate == "dark_post":
+        await state.set_state(AdStates.waiting_image)
+        await message.answer("✅ تم حفظ البروكسي.\n📸 أرسل الصورة:", reply_markup=kb_back())
+    elif gate == "boost_post":
+        await state.set_state(AdStates.waiting_post_id)
+        await message.answer("✅ تم حفظ البروكسي.\n📝 أدخل Post ID:", reply_markup=kb_back())
+    elif gate == "page_like":
+        await state.set_state(AdStates.waiting_budget)
+        await message.answer("✅ تم حفظ البروكسي.\n💰 أدخل الميزانية اليومية ($):", reply_markup=kb_back())
+    elif gate == "event":
+        await state.set_state(AdStates.waiting_event_name)
+        await message.answer("✅ تم حفظ البروكسي.\n🎪 أدخل اسم الحدث:", reply_markup=kb_back())
 
 @router.message(AdStates.waiting_image)
 async def process_image(message: Message, state: FSMContext):
@@ -455,7 +626,8 @@ async def process_image(message: Message, state: FSMContext):
             image_bytes = await resp.read()
     
     data = await state.get_data()
-    result = await fb_upload_image(data["token"], data["page_id"], image_bytes)
+    proxy = data.get("proxy")
+    result = await fb_upload_image(data["token"], data["page_id"], image_bytes, proxy)
     
     if not result.get("ok"):
         await message.answer(f"❌ فشل رفع الصورة: {result.get('error')}", reply_markup=kb_home())
@@ -472,15 +644,9 @@ async def process_message_text(message: Message, state: FSMContext):
         return
     
     await state.update_data(message=message.text)
-    await state.set_state(AdStates.waiting_link)
-    await message.answer("✅ تم حفظ النص.\n🔗 أرسل الرابط (اختياري) أو اكتب 'تخطي':", reply_markup=kb_back())
-
-@router.message(AdStates.waiting_link)
-async def process_link(message: Message, state: FSMContext):
-    link = "" if message.text.lower() in ["تخطي", "skip"] else message.text
-    await state.update_data(link=link)
+    await state.update_data(link="")
     await state.set_state(AdStates.waiting_country)
-    await message.answer("✅ تم.\n🌍 أدخل الدولة المستهدفة (رمز الدولة، مثل: EG, US, SA):", reply_markup=kb_back())
+    await message.answer("✅ تم حفظ النص.\n🌍 أدخل الدولة المستهدفة (مثل: EG, US, SA):", reply_markup=kb_back())
 
 @router.message(AdStates.waiting_country)
 async def process_country(message: Message, state: FSMContext):
@@ -496,7 +662,6 @@ async def process_country(message: Message, state: FSMContext):
 @router.message(AdStates.waiting_age)
 async def process_age(message: Message, state: FSMContext):
     text = message.text.strip()
-    import re
     if not re.match(r'^\d{1,2}-\d{1,2}$', text):
         await message.answer("❌ الصيغة غير صحيحة. استخدم 18-65 مثلاً.", reply_markup=kb_back())
         return
@@ -584,21 +749,43 @@ async def process_days(message: Message, state: FSMContext):
         return
     
     await state.update_data(days=days)
+    
+    # ⚡ اطلب حالة الإعلان
+    await state.set_state(AdStates.waiting_ad_status)
+    await message.answer("⚡ اختر حالة الإعلان عند الإنشاء:", reply_markup=kb_ad_status())
+
+@router.callback_query(F.data.startswith("status:"))
+async def cb_ad_status(callback: CallbackQuery, state: FSMContext):
+    status = callback.data.split(":")[1]
+    await state.update_data(ad_status=status)
+    
     data = await state.get_data()
+    
+    obj_names = {
+        "POST_ENGAGEMENT": "👍 تفاعل المنشور",
+        "REACH": "👁 الوصول",
+        "PAGE_LIKES": "👥 زيارات الصفحة",
+        "LINK_CLICKS": "🔗 النقرات على الرابط",
+        "VIDEO_VIEWS": "📹 مشاهدات الفيديو",
+        "CONVERSATIONS": "💬 رسائل"
+    }
+    
+    status_names = {
+        "ACTIVE": "▶️ نشط",
+        "PAUSED": "⏸ متوقف"
+    }
     
     summary = f"📋 <b>مراجعة البيانات</b>\n━━━━━━━━━━━━━━━━━━━━\n"
     summary += f"🔑 التوكن: {data.get('token', '')[:10]}...\n"
     summary += f"🆔 Account: {data.get('account_id')}\n"
     summary += f"📄 Page: {data.get('page_id')}\n"
+    summary += f"🎯 الهدف: {obj_names.get(data.get('objective'), data.get('objective'))}\n"
+    summary += f"🌐 البروكسي: {'✅ مستخدم' if data.get('proxy') else '❌ بدون'}\n"
     
     gate = data.get("gate")
     if gate == "dark_post":
         summary += f"🖼 الصورة: تم رفعها\n"
         summary += f"📝 النص: {data.get('message', '')[:30]}...\n"
-        summary += f"🔗 الرابط: {data.get('link') or 'بدون'}\n"
-        summary += f"🌍 الدولة: {data.get('country')}\n"
-        summary += f"👤 العمر: {data.get('age')}\n"
-        summary += f"⚧ الجنس: {data.get('gender')}\n"
     elif gate == "boost_post":
         summary += f"📝 Post ID: {data.get('post_id')}\n"
     elif gate == "event":
@@ -606,12 +793,17 @@ async def process_days(message: Message, state: FSMContext):
         summary += f"🕐 البداية: {data.get('event_start')}\n"
         summary += f"🕐 النهاية: {data.get('event_end')}\n"
     
+    summary += f"🌍 الدولة: {data.get('country')}\n"
+    summary += f"👤 العمر: {data.get('age')}\n"
+    summary += f"⚧ الجنس: {data.get('gender')}\n"
     summary += f"💰 الميزانية: {data.get('budget')}$/يوم\n"
     summary += f"📅 المدة: {data.get('days')} أيام\n"
+    summary += f"⚡ الحالة: {status_names.get(status, status)}\n"
     summary += f"━━━━━━━━━━━━━━━━━━━━\n"
     summary += f"هل البيانات صحيحة؟"
     
-    await message.answer(summary, reply_markup=kb_confirm(), parse_mode="HTML")
+    await callback.message.edit_text(summary, reply_markup=kb_confirm(), parse_mode="HTML")
+    await callback.answer()
 
 @router.callback_query(F.data == "confirm:yes")
 async def cb_confirm_yes(callback: CallbackQuery, state: FSMContext):
@@ -622,9 +814,22 @@ async def cb_confirm_yes(callback: CallbackQuery, state: FSMContext):
     token = data.get("token")
     acc_id = data.get("account_id")
     budget = data.get("budget")
+    objective = data.get("objective", "POST_ENGAGEMENT")
+    ad_status = data.get("ad_status", "ACTIVE")
+    proxy = data.get("proxy")
     
     DB["stats"]["requests"] = DB["stats"].get("requests", 0) + 1
     save_data()
+    
+    campaign_objectives = {
+        "POST_ENGAGEMENT": "OUTCOME_ENGAGEMENT",
+        "REACH": "OUTCOME_AWARENESS",
+        "PAGE_LIKES": "OUTCOME_ENGAGEMENT",
+        "LINK_CLICKS": "OUTCOME_TRAFFIC",
+        "VIDEO_VIEWS": "OUTCOME_AWARENESS",
+        "CONVERSATIONS": "OUTCOME_ENGAGEMENT"
+    }
+    campaign_objective = campaign_objectives.get(objective, "OUTCOME_ENGAGEMENT")
     
     try:
         if gate == "dark_post":
@@ -636,11 +841,11 @@ async def cb_confirm_yes(callback: CallbackQuery, state: FSMContext):
             age = data.get("age")
             gender = data.get("gender")
             
-            dark_post = await fb_create_dark_post(token, page_id, image_id, message, link)
+            dark_post = await fb_create_dark_post(token, page_id, image_id, message, link, proxy)
             if not dark_post.get("ok"):
                 raise Exception(dark_post.get("error"))
             
-            campaign = await fb_create_campaign(token, acc_id, "OUTCOME_ENGAGEMENT", budget)
+            campaign = await fb_create_campaign(token, acc_id, campaign_objective, budget, proxy)
             if not campaign.get("ok"):
                 raise Exception(campaign.get("error"))
             
@@ -650,16 +855,21 @@ async def cb_confirm_yes(callback: CallbackQuery, state: FSMContext):
                 "age_max": int(age.split("-")[1]),
                 "genders": [1] if gender == "male" else [2] if gender == "female" else [1, 2]
             }
-            adset = await fb_create_adset(token, acc_id, campaign["id"], budget, targeting, "POST_ENGAGEMENT")
+            
+            adset = await fb_create_adset(token, acc_id, campaign["id"], budget, targeting, objective, proxy)
             if not adset.get("ok"):
                 raise Exception(adset.get("error"))
             
             creative = {"object_story_id": dark_post["id"]}
-            ad = await fb_create_ad(token, acc_id, adset["id"], creative, "ACTIVE")
+            ad = await fb_create_ad(token, acc_id, adset["id"], creative, ad_status, proxy)
             if not ad.get("ok"):
                 raise Exception(ad.get("error"))
             
-            await callback.message.edit_text(f"✅ تم إنشاء الإعلان بنجاح!\n\n🆔 Ad ID: <code>{ad['id']}</code>", reply_markup=kb_home(), parse_mode="HTML")
+            await callback.message.edit_text(
+                f"✅ تم إنشاء الإعلان بنجاح!\n\n🆔 Ad ID: <code>{ad['id']}</code>\n⚡ الحالة: {ad_status}", 
+                reply_markup=kb_home(), 
+                parse_mode="HTML"
+            )
         
     except Exception as e:
         await callback.message.edit_text(f"❌ فشل إنشاء الإعلان:\n{str(e)}", reply_markup=kb_home())
@@ -682,7 +892,11 @@ async def cb_admin(callback: CallbackQuery, state: FSMContext):
         users = DB["stats"].get("users", 0)
         reqs = DB["stats"].get("requests", 0)
         proxies = len(DB.get("proxies", []))
-        await callback.message.edit_text(f"📊 <b>الإحصائيات</b>\n\n👤 المستخدمون: {users}\n📋 الطلبات: {reqs}\n🌐 البروكسيات: {proxies}", reply_markup=kb_admin(), parse_mode="HTML")
+        await callback.message.edit_text(
+            f"📊 <b>الإحصائيات</b>\n\n👤 المستخدمون: {users}\n📋 الطلبات: {reqs}\n🌐 البروكسيات: {proxies}", 
+            reply_markup=kb_admin(), 
+            parse_mode="HTML"
+        )
     
     elif action == "gen_code":
         await state.set_state(AdStates.waiting_admin_gen_code)

@@ -3,7 +3,6 @@ BESHOY BOOST BOT - Universal Edition
 يعمل على أي سيرفر - مستقل تماماً
 FastAPI + Redis + 5 Ad Gates + Full Admin Panel
 """
-
 import os
 import re
 import json
@@ -16,7 +15,6 @@ import traceback
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Any, Dict
 from contextlib import asynccontextmanager
-
 import httpx
 import redis.asyncio as redis
 from fastapi import FastAPI, Request, HTTPException
@@ -25,6 +23,13 @@ from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
+
+# Logging (لازم يكون قبل أي استخدام لـ logger)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 # ─── Configuration ────────────────────────────────────────
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
@@ -37,21 +42,14 @@ PORT = int(os.environ.get("PORT", "8000"))
 BOT_NAME = "🚀 BESHOY BOOST BOT"
 ADMIN_CMD = "beshoy"
 FB_API = "https://graph.facebook.com/v18.0"
-REDIS_NS = "beshoy"  # Redis namespace
-STATE_TTL = 1800  # 30 دقيقة: تنظيف الـ state المتروكة (بما فيها التوكنات)
+REDIS_NS = "beshoy"
+STATE_TTL = 1800
 
 if not TOKEN:
     raise ValueError("TELEGRAM_BOT_TOKEN not set!")
 
 if ADMIN_PASS == "Nemo@1986":
     logger.warning("⚠️ ADMIN_PASS لسه الافتراضي! غيّره من متغيرات البيئة فوراً.")
-
-# Logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
 
 # ─── Redis Connection ─────────────────────────────────────
 redis_pool: Optional[redis.Redis] = None
@@ -64,10 +62,8 @@ async def get_redis() -> redis.Redis:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
     global redis_pool
     redis_pool = redis.from_url(REDIS_URL, decode_responses=True)
-    # نتأكد إن Redis بيرد قبل ما نكمل
     for i in range(10):
         try:
             await redis_pool.ping()
@@ -78,8 +74,7 @@ async def lifespan(app: FastAPI):
             await asyncio.sleep(2)
     else:
         raise RuntimeError("❌ Redis مش بيرد بعد 10 محاولات")
-    
-    # تسجيل الـ webhook على تيليجرام لو WEBHOOK_URL متظبط
+
     if WEBHOOK_URL:
         params = {"url": f"{WEBHOOK_URL}/webhook"}
         if WEBHOOK_SECRET:
@@ -91,9 +86,9 @@ async def lifespan(app: FastAPI):
             logger.error(f"❌ Webhook registration failed: {e}")
     else:
         logger.warning("⚠️ WEBHOOK_URL مش متظبط — البوت هيستلم الطلبات بس من غير setWebhook تلقائي.")
-    
+
     yield
-    # Shutdown
+
     if redis_pool:
         await redis_pool.close()
         logger.info("👋 Redis disconnected")
@@ -318,7 +313,6 @@ async def db_get_all_uids(r):
 
 # ─── Facebook API Functions ───────────────────────────────
 def parse_proxy(proxy_str):
-    """يرجع URL واحد (لـ httpx 0.28+) أو None."""
     if not proxy_str:
         return None
     proxy_str = proxy_str.strip()
@@ -342,16 +336,16 @@ async def fb_upload_image(token, page_id, image_bytes, proxy=None):
     async with httpx.AsyncClient(timeout=30, proxy=parse_proxy(proxy)) as c:
         resp = await c.post(url, files=files, params=params)
         data = resp.json()
-        if "id" in data:
-            return {"ok": True, "id": data["id"]}
-        return {"ok": False, "error": data.get("error", {}).get("message", "Unknown")}
+    if "id" in data:
+        return {"ok": True, "id": data["id"]}
+    return {"ok": False, "error": data.get("error", {}).get("message", "Unknown")}
 
 async def fb_create_dark_post(token, page_id, image_id, message, link="", proxy=None):
     url = f"{FB_API}/{page_id}/feed"
     payload = {
         "access_token": token,
         "message": message,
-        "attached_media": f'[{{"media_fbid":"{image_id}"}}]',
+        "attached_media": f'[{{"media_fbid": "{image_id}"}}]',
         "published": "false"
     }
     if link:
@@ -359,9 +353,9 @@ async def fb_create_dark_post(token, page_id, image_id, message, link="", proxy=
     async with httpx.AsyncClient(timeout=30, proxy=parse_proxy(proxy)) as c:
         resp = await c.post(url, data=payload)
         data = resp.json()
-        if "id" in data:
-            return {"ok": True, "id": data["id"]}
-        return {"ok": False, "error": data.get("error", {}).get("message", "Unknown")}
+    if "id" in data:
+        return {"ok": True, "id": data["id"]}
+    return {"ok": False, "error": data.get("error", {}).get("message", "Unknown")}
 
 async def fb_create_campaign(token, account_id, objective, budget, status="PAUSED", proxy=None):
     url = f"{FB_API}/act_{account_id}/campaigns"
@@ -376,9 +370,9 @@ async def fb_create_campaign(token, account_id, objective, budget, status="PAUSE
     async with httpx.AsyncClient(timeout=30, proxy=parse_proxy(proxy)) as c:
         resp = await c.post(url, params=params)
         data = resp.json()
-        if "id" in data:
-            return {"ok": True, "id": data["id"]}
-        return {"ok": False, "error": data.get("error", {}).get("message", "Unknown")}
+    if "id" in data:
+        return {"ok": True, "id": data["id"]}
+    return {"ok": False, "error": data.get("error", {}).get("message", "Unknown")}
 
 async def fb_create_adset(token, account_id, campaign_id, budget, targeting, status="PAUSED", proxy=None, opt_goal="REACH"):
     url = f"{FB_API}/act_{account_id}/adsets"
@@ -395,9 +389,9 @@ async def fb_create_adset(token, account_id, campaign_id, budget, targeting, sta
     async with httpx.AsyncClient(timeout=30, proxy=parse_proxy(proxy)) as c:
         resp = await c.post(url, params=params)
         data = resp.json()
-        if "id" in data:
-            return {"ok": True, "id": data["id"]}
-        return {"ok": False, "error": data.get("error", {}).get("message", "Unknown")}
+    if "id" in data:
+        return {"ok": True, "id": data["id"]}
+    return {"ok": False, "error": data.get("error", {}).get("message", "Unknown")}
 
 async def fb_create_ad(token, account_id, adset_id, creative, status="PAUSED", proxy=None):
     url = f"{FB_API}/act_{account_id}/ads"
@@ -411,9 +405,9 @@ async def fb_create_ad(token, account_id, adset_id, creative, status="PAUSED", p
     async with httpx.AsyncClient(timeout=30, proxy=parse_proxy(proxy)) as c:
         resp = await c.post(url, params=params)
         data = resp.json()
-        if "id" in data:
-            return {"ok": True, "id": data["id"]}
-        return {"ok": False, "error": data.get("error", {}).get("message", "Unknown")}
+    if "id" in data:
+        return {"ok": True, "id": data["id"]}
+    return {"ok": False, "error": data.get("error", {}).get("message", "Unknown")}
 
 async def fb_create_event(token, page_id, name, desc, start, end, proxy=None):
     url = f"{FB_API}/{page_id}/events"
@@ -427,9 +421,9 @@ async def fb_create_event(token, page_id, name, desc, start, end, proxy=None):
     async with httpx.AsyncClient(timeout=30, proxy=parse_proxy(proxy)) as c:
         resp = await c.post(url, params=params)
         data = resp.json()
-        if "id" in data:
-            return {"ok": True, "id": data["id"]}
-        return {"ok": False, "error": data.get("error", {}).get("message", "Unknown")}
+    if "id" in data:
+        return {"ok": True, "id": data["id"]}
+    return {"ok": False, "error": data.get("error", {}).get("message", "Unknown")}
 
 # ─── Ad Execution Logic ───────────────────────────────────
 async def execute_ad(r, uid, state):
@@ -439,7 +433,6 @@ async def execute_ad(r, uid, state):
     acc_id = state.get("account_id")
     budget = state.get("budget")
     days = state.get("days")
-    
     try:
         if gate == "dark_post":
             page_id = state.get("page_id")
@@ -449,15 +442,15 @@ async def execute_ad(r, uid, state):
             country = state.get("country")
             age = state.get("age")
             gender = state.get("gender")
-            
+
             dark_post = await fb_create_dark_post(token, page_id, image_id, message, link, proxy)
             if not dark_post.get("ok"):
                 raise Exception(dark_post.get("error"))
-            
+
             campaign = await fb_create_campaign(token, acc_id, "OUTCOME_ENGAGEMENT", budget, "PAUSED", proxy)
             if not campaign.get("ok"):
                 raise Exception(campaign.get("error"))
-            
+
             targeting = {
                 "geo_locations": {"countries": [country]},
                 "age_min": int(age.split("-")[0]),
@@ -467,51 +460,51 @@ async def execute_ad(r, uid, state):
             adset = await fb_create_adset(token, acc_id, campaign["id"], budget, targeting, "PAUSED", proxy, "POST_ENGAGEMENT")
             if not adset.get("ok"):
                 raise Exception(adset.get("error"))
-            
+
             creative = {"object_story_id": dark_post["id"]}
             ad = await fb_create_ad(token, acc_id, adset["id"], creative, "ACTIVE", proxy)
             if not ad.get("ok"):
                 raise Exception(ad.get("error"))
-            
+
             return {"ok": True, "ad_id": ad["id"], "campaign_id": campaign["id"], "adset_id": adset["id"]}
-            
+
         elif gate == "boost_post":
             page_id = state.get("page_id")
             post_id = state.get("post_id")
             campaign = await fb_create_campaign(token, acc_id, "OUTCOME_ENGAGEMENT", budget, "PAUSED", proxy)
             if not campaign.get("ok"):
                 raise Exception(campaign.get("error"))
-            
+
             targeting = {"geo_locations": {"countries": ["US"]}}
             adset = await fb_create_adset(token, acc_id, campaign["id"], budget, targeting, "PAUSED", proxy, "POST_ENGAGEMENT")
             if not adset.get("ok"):
                 raise Exception(adset.get("error"))
-            
+
             creative = {"object_story_id": f"{page_id}_{post_id}"}
             ad = await fb_create_ad(token, acc_id, adset["id"], creative, "ACTIVE", proxy)
             if not ad.get("ok"):
                 raise Exception(ad.get("error"))
-            
+
             return {"ok": True, "ad_id": ad["id"]}
-            
+
         elif gate == "page_like":
             page_id = state.get("page_id")
             campaign = await fb_create_campaign(token, acc_id, "OUTCOME_ENGAGEMENT", budget, "PAUSED", proxy)
             if not campaign.get("ok"):
                 raise Exception(campaign.get("error"))
-            
+
             targeting = {"page_ids": [page_id], "geo_locations": {"countries": ["US"]}}
             adset = await fb_create_adset(token, acc_id, campaign["id"], budget, targeting, "PAUSED", proxy, "PAGE_ENGAGEMENT")
             if not adset.get("ok"):
                 raise Exception(adset.get("error"))
-            
+
             creative = {"page_id": page_id, "use_page_actor_identity": True}
             ad = await fb_create_ad(token, acc_id, adset["id"], creative, "ACTIVE", proxy)
             if not ad.get("ok"):
                 raise Exception(ad.get("error"))
-            
+
             return {"ok": True, "ad_id": ad["id"]}
-            
+
         elif gate == "partner_ship":
             obj = state.get("objective")
             obj_map = {
@@ -526,46 +519,46 @@ async def execute_ad(r, uid, state):
             campaign = await fb_create_campaign(token, acc_id, fb_obj, budget, "PAUSED", proxy)
             if not campaign.get("ok"):
                 raise Exception(campaign.get("error"))
-            
+
             targeting = {"geo_locations": {"countries": ["US"]}}
             adset = await fb_create_adset(token, acc_id, campaign["id"], budget, targeting, "PAUSED", proxy)
             if not adset.get("ok"):
                 raise Exception(adset.get("error"))
-            
+
             creative = {"page_id": state.get("page_id", ""), "message": "Partner Ship Ad"}
             ad = await fb_create_ad(token, acc_id, adset["id"], creative, "ACTIVE", proxy)
             if not ad.get("ok"):
                 raise Exception(ad.get("error"))
-            
+
             return {"ok": True, "ad_id": ad["id"]}
-            
+
         elif gate == "event":
             page_id = state.get("page_id")
             name = state.get("event_name")
             desc = state.get("event_desc")
             start = state.get("event_start")
             end = state.get("event_end")
-            
+
             event = await fb_create_event(token, page_id, name, desc, start, end, proxy)
             if not event.get("ok"):
                 raise Exception(event.get("error"))
-            
+
             campaign = await fb_create_campaign(token, acc_id, "OUTCOME_ENGAGEMENT", budget, "PAUSED", proxy)
             if not campaign.get("ok"):
                 raise Exception(campaign.get("error"))
-            
+
             targeting = {"geo_locations": {"countries": ["US"]}}
             adset = await fb_create_adset(token, acc_id, campaign["id"], budget, targeting, "PAUSED", proxy)
             if not adset.get("ok"):
                 raise Exception(adset.get("error"))
-            
+
             creative = {"event_id": event["id"]}
             ad = await fb_create_ad(token, acc_id, adset["id"], creative, "ACTIVE", proxy)
             if not ad.get("ok"):
                 raise Exception(ad.get("error"))
-            
+
             return {"ok": True, "ad_id": ad["id"], "event_id": event["id"]}
-            
+
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
@@ -755,7 +748,6 @@ async def handle_gate_message(r, uid, cid, mid, text, msg, state):
     st = state.get("st")
     gate = state.get("gate")
 
-    # Token step
     if st.endswith("_token"):
         info = await fb_check_token(text, state.get("proxy"))
         if "id" not in info:
@@ -768,7 +760,6 @@ async def handle_gate_message(r, uid, cid, mid, text, msg, state):
         await send_msg(cid, "✅ تم التحقق من التوكن.\n🌐 اختر البروكسي:", kb_proxy())
         return
 
-    # Custom Proxy step
     if st.endswith("_px_in"):
         state["proxy"] = text
         state["st"] = f"gate_{gate}_acc"
@@ -776,7 +767,6 @@ async def handle_gate_message(r, uid, cid, mid, text, msg, state):
         await send_msg(cid, f"✅ البروكسي: {text}\n🆔 أدخل Account ID:", kb_back())
         return
 
-    # Account ID step
     if st.endswith("_acc"):
         if not re.match(r'^\d{10,20}$', text):
             await send_msg(cid, "❌ Account ID غير صحيح (10-20 رقم)", kb_back())
@@ -787,7 +777,6 @@ async def handle_gate_message(r, uid, cid, mid, text, msg, state):
         await send_msg(cid, "✅ تم حفظ Account ID.\n📄 أدخل Page ID:", kb_back())
         return
 
-    # Page ID step
     if st.endswith("_page"):
         if not re.match(r'^\d+$', text):
             await send_msg(cid, "❌ Page ID غير صحيح", kb_back())
@@ -811,7 +800,6 @@ async def handle_gate_message(r, uid, cid, mid, text, msg, state):
         await db_set_state(r, uid, state)
         return
 
-    # Image step (Dark Post)
     if st == "gate_dark_post_image":
         if "photo" not in msg:
             await send_msg(cid, "❌ أرسل صورة (JPG أو PNG).", kb_back())
@@ -827,7 +815,7 @@ async def handle_gate_message(r, uid, cid, mid, text, msg, state):
         async with httpx.AsyncClient() as c:
             resp = await c.get(file_url)
             image_bytes = resp.content
-        
+
         result = await fb_upload_image(state["token"], state["page_id"], image_bytes, state.get("proxy"))
         if not result.get("ok"):
             await send_msg(cid, f"❌ فشل رفع الصورة: {result.get('error')}", kb_home())
@@ -838,7 +826,6 @@ async def handle_gate_message(r, uid, cid, mid, text, msg, state):
         await send_msg(cid, "✅ تم رفع الصورة.\n💬 أرسل النص الأساسي للإعلان:", kb_back())
         return
 
-    # Message step (Dark Post)
     if st == "gate_dark_post_message":
         if len(text) < 5:
             await send_msg(cid, "❌ النص قصير جداً (على الأقل 5 أحرف)", kb_back())
@@ -849,7 +836,6 @@ async def handle_gate_message(r, uid, cid, mid, text, msg, state):
         await send_msg(cid, "✅ تم حفظ النص.\n🔗 أرسل الرابط (اختياري) أو اكتب 'تخطي':", kb_back())
         return
 
-    # Link step (Dark Post)
     if st == "gate_dark_post_link":
         if text.lower() == "تخطي" or text.lower() == "skip":
             state["link"] = ""
@@ -860,7 +846,6 @@ async def handle_gate_message(r, uid, cid, mid, text, msg, state):
         await send_msg(cid, "✅ تم.\n🌍 أدخل الدولة المستهدفة (رمز الدولة، مثل: EG, US, SA):", kb_back())
         return
 
-    # Country step (Dark Post)
     if st == "gate_dark_post_country":
         if len(text) != 2 or not text.isalpha():
             await send_msg(cid, "❌ رمز الدولة يجب أن يكون حرفين (مثل EG)", kb_back())
@@ -871,7 +856,6 @@ async def handle_gate_message(r, uid, cid, mid, text, msg, state):
         await send_msg(cid, f"✅ الدولة: {text.upper()}\n👤 أدخل الفئة العمرية (مثال: 18-65):", kb_back())
         return
 
-    # Age step (Dark Post)
     if st == "gate_dark_post_age":
         if not re.match(r'^\d{1,2}-\d{1,2}$', text):
             await send_msg(cid, "❌ الصيغة غير صحيحة. استخدم 18-65 مثلاً.", kb_back())
@@ -886,7 +870,6 @@ async def handle_gate_message(r, uid, cid, mid, text, msg, state):
         await send_msg(cid, f"✅ العمر: {text}\n⚧ اختر الجنس:", kb_gender())
         return
 
-    # Post ID step (Boost Post)
     if st == "gate_boost_post_postid":
         if len(text) < 5:
             await send_msg(cid, "❌ Post ID قصير جداً", kb_back())
@@ -897,7 +880,6 @@ async def handle_gate_message(r, uid, cid, mid, text, msg, state):
         await send_msg(cid, "✅ تم حفظ Post ID.\n💰 أدخل الميزانية اليومية ($):", kb_back())
         return
 
-    # Event steps
     if st == "gate_event_name":
         if len(text) < 3:
             await send_msg(cid, "❌ اسم الحدث قصير جداً", kb_back())
@@ -932,7 +914,6 @@ async def handle_gate_message(r, uid, cid, mid, text, msg, state):
         await send_msg(cid, "✅ تم حفظ النهاية.\n💰 أدخل الميزانية اليومية ($):", kb_back())
         return
 
-    # Budget step (Generic)
     if st.endswith("_budget"):
         try:
             budget = float(text)
@@ -947,7 +928,6 @@ async def handle_gate_message(r, uid, cid, mid, text, msg, state):
         await send_msg(cid, f"✅ الميزانية: {budget}$/يوم\n📅 أدخل عدد الأيام (1-365):", kb_back())
         return
 
-    # Days step (Generic)
     if st.endswith("_days"):
         try:
             days = int(text)
@@ -959,8 +939,7 @@ async def handle_gate_message(r, uid, cid, mid, text, msg, state):
         state["days"] = days
         state["st"] = st.replace("_days", "_review")
         await db_set_state(r, uid, state)
-        
-        # Build review summary
+
         summary = f"📋 <b>مراجعة البيانات</b>\n━━━━━━━━━━━━━━━━━━━━\n"
         summary += f"🔑 التوكن: {state.get('token', '')[:10]}...\n"
         summary += f"🌐 البروكسي: {state.get('proxy') or 'بدون'}\n"
@@ -985,7 +964,7 @@ async def handle_gate_message(r, uid, cid, mid, text, msg, state):
         summary += f"📅 المدة: {state.get('days')} أيام\n"
         summary += f"━━━━━━━━━━━━━━━━━━━━\n"
         summary += f"هل البيانات صحيحة؟"
-        
+
         await send_msg(cid, summary, kb_confirm())
         return
 
@@ -1029,7 +1008,7 @@ async def handle_admin_message(r, uid, cid, text, state):
             await send_msg(cid, "❌ رقم ساعات غير صحيح", kb_admin())
         await db_set_state(r, uid, {"st": "admin_menu"})
         return
-        
+
     if st == "admin_set_user":
         parts = text.split("|")
         if len(parts) != 2:
@@ -1044,7 +1023,7 @@ async def handle_admin_message(r, uid, cid, text, state):
             await send_msg(cid, "❌ بيانات غير صحيحة", kb_admin())
         await db_set_state(r, uid, {"st": "admin_menu"})
         return
-        
+
     if st == "admin_remove_user":
         try:
             tid = int(text)
@@ -1057,7 +1036,7 @@ async def handle_admin_message(r, uid, cid, text, state):
             await send_msg(cid, "❌ UID غير صحيح", kb_admin())
         await db_set_state(r, uid, {"st": "admin_menu"})
         return
-        
+
     if st == "admin_broadcast":
         uids = await db_get_all_uids(r)
         success = 0
@@ -1070,7 +1049,7 @@ async def handle_admin_message(r, uid, cid, text, state):
         await send_msg(cid, f"✅ تم الإرسال لـ {success} مستخدم", kb_admin())
         await db_set_state(r, uid, {"st": "admin_menu"})
         return
-        
+
     if st == "admin_add_proxies":
         count = await db_add_proxies(r, text)
         await send_msg(cid, f"✅ تمت إضافة {count} بروكسي", kb_admin())
@@ -1080,7 +1059,6 @@ async def handle_admin_message(r, uid, cid, text, state):
 # ─── FastAPI Endpoints ────────────────────────────────────
 @app.post("/")
 async def root(request: Request):
-    # التحقق من secret token لو متظبط
     if WEBHOOK_SECRET:
         secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
         if secret != WEBHOOK_SECRET:
@@ -1088,12 +1066,10 @@ async def root(request: Request):
     body = await request.json()
     if "update_id" in body:
         await handle_update(body)
-        return {"ok": True}
-    return {"status": "running", "bot": BOT_NAME}
+    return {"ok": True}
 
 @app.post("/webhook")
 async def webhook(request: Request):
-    # التحقق من secret token لو متظبط
     if WEBHOOK_SECRET:
         secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
         if secret != WEBHOOK_SECRET:
@@ -1136,10 +1112,6 @@ async def setup(req: SetupReq):
 @app.get("/health")
 async def health():
     return {"status": "healthy", "bot": BOT_NAME}
-
-# ─── Polling disabled (webhook-only for Railway) ─────────
-# الـ polling بيتعارض مع الـ webhook على تيليجرام، فشيلناه نهائياً.
-# لو محتاج polling (للاختبار المحلي)، شغّل: python -c "import asyncio; from beshoy_bot import polling_loop; asyncio.run(polling_loop())"
 
 # ─── Main Entry Point ─────────────────────────────────────
 async def main():

@@ -207,9 +207,20 @@ async def fb_request(method: str, endpoint: str, data: dict = None, proxy: str =
             return {"error": {"message": str(e)}}
 
 async def fb_check_token(token: str, proxy: str = None) -> dict:
-    return await fb_request("GET", "me", {"access_token": token, "fields": "id,name"}, proxy)
+    """التحقق من التوكن والصلاحيات المطلوبة"""
+    result = await fb_request("GET", "me", {"access_token": token, "fields": "id,name"}, proxy)
+    if "error" not in result:
+        # التحقق من الصلاحيات
+        perms = await fb_request("GET", "me/permissions", {"access_token": token}, proxy)
+        if "data" in perms:
+            perms_list = [p["permission"] for p in perms["data"] if p.get("status") == "granted"]
+            result["permissions"] = perms_list
+            if "publish_pages" not in perms_list:
+                result["warning"] = "⚠️ صلاحية publish_pages غير موجودة - قد تواجه مشاكل في النشر"
+    return result
 
 async def fb_upload_image(token: str, page_id: str, image_bytes: bytes, proxy: str = None) -> dict:
+    """رفع الصورة على الصفحة - يجب أن يكون التوكن يملك publish_pages"""
     url = f"{FB_API}/{page_id}/photos"
     data = {"access_token": token, "published": "false"}
     async with aiohttp.ClientSession() as session:
@@ -222,11 +233,16 @@ async def fb_upload_image(token: str, page_id: str, image_bytes: bytes, proxy: s
                 result = await resp.json()
                 if "id" in result:
                     return {"ok": True, "id": result["id"]}
-                return {"ok": False, "error": result.get("error", {}).get("message", "Unknown")}
+                error_msg = result.get("error", {}).get("message", "Unknown")
+                # معالجة خاصة للخطأ #200
+                if "#200" in str(error_msg) or "not allowed to publish" in str(error_msg):
+                    error_msg = "❌ Access Token لا يملك صلاحية publish_pages. اطلب صلاحيات جديدة من Facebook."
+                return {"ok": False, "error": error_msg}
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
 async def fb_create_dark_post(token: str, page_id: str, image_id: str, message: str, link: str = "", proxy: str = None) -> dict:
+    """إنشاء Dark Post - الصورة يجب أن تكون مرفوعة مسبقاً كـ unpublished photo"""
     data = {
         "access_token": token, "message": message,
         "attached_media": f'[{{"media_fbid": "{image_id}"}}]',
@@ -235,7 +251,21 @@ async def fb_create_dark_post(token: str, page_id: str, image_id: str, message: 
     if link:
         data["link"] = link
     result = await fb_request("POST", f"{page_id}/feed", data, proxy)
-    return {"ok": "id" in result, "id": result.get("id"), "error": result.get("error", {}).get("message", "")}
+    error = result.get("error", {}).get("message", "")
+    
+    # معالجة خاصة للأخطاء الشائعة
+    if "#200" in str(error) or "not allowed" in str(error):
+        error = "❌ الصلاحيات غير كافية. تأكد من أن التوكن يملك publish_pages"
+    elif "#803" in str(error):
+        error = "❌ الصورة غير صالحة أو منتهية الصلاحية"
+    elif "#10" in str(error):
+        error = "❌ الحساب أو الصفحة غير موجودة"
+    
+    return {
+        "ok": "id" in result,
+        "id": result.get("id"),
+        "error": error if error else result.get("error", {}).get("message", "")
+    }
 
 async def fb_create_campaign(token: str, acc_id: str, objective: str, budget: float, proxy: str = None) -> dict:
     data = {
@@ -377,10 +407,14 @@ async def process_token(message: Message, state: FSMContext):
     token = message.text.strip()
     info = await fb_check_token(token)
     
-    if "id" not in info:
+    if "error" in info:
         await state.clear()
         await message.answer(f"❌ التوكن غير صالح: {info.get('error', {}).get('message', '')}", reply_markup=kb_home())
         return
+    
+    warning = info.get("warning", "")
+    if warning:
+        await message.answer(warning)
     
     await state.update_data(token=token)
     gate = (await state.get_data()).get("gate")
@@ -444,7 +478,13 @@ async def process_image(message: Message, state: FSMContext):
     result = await fb_upload_image(data["token"], data["page_id"], image_bytes)
     
     if not result.get("ok"):
-        await message.answer(f"❌ فشل رفع الصورة: {result.get('error')}", reply_markup=kb_home())
+        error_msg = result.get('error', 'خطأ غير معروف')
+        
+        # إذا كان الخطأ متعلقاً بالصلاحيات، أعطِ تعليمات إضافية
+        if "publish_pages" in str(error_msg) or "#200" in str(error_msg):
+            error_msg += "\n\n💡 <b>الحل:</b>\n1. اذهب إلى https://developers.facebook.com/\n2. اطلب صلاحيات publish_pages و pages_read_engagement\n3. جدّد التوكن"
+        
+        await message.answer(f"❌ فشل رفع الصورة:\n{error_msg}", reply_markup=kb_home(), parse_mode="HTML")
         return
     
     await state.update_data(image_id=result["id"])

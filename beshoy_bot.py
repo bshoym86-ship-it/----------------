@@ -2,7 +2,6 @@
 BESHOY BOT - النسخة الكاملة
 aiogram 3.20+ + JSON (بدون Redis)
 مع أزرار ملوّنة (Bot API 9.4)
-- تحديث: إضافة خيار (متوقف + إلغاء نشر الصفحة فورا)
 """
 import os
 import json
@@ -161,6 +160,8 @@ def get_random_proxy() -> dict:
     return parse_proxy(proxy_str)
 
 # ─── دالة الأزرار (Bot API 9.4 - القيم الصحيحة فقط) ──────
+# القيم الصحيحة: "primary" (أزرق) | "success" (أخضر) | "danger" (أحمر)
+# "secondary" غير موجودة في Telegram API وتسبب خطأ
 def _btn(text: str, *,
          callback_data: Optional[str] = None,
          url: Optional[str] = None,
@@ -170,6 +171,7 @@ def _btn(text: str, *,
         kwargs["callback_data"] = callback_data
     if url is not None:
         kwargs["url"] = url
+    # فقط القيم الصحيحة المدعومة من Telegram
     if style in ("primary", "success", "danger"):
         kwargs["style"] = style
     return InlineKeyboardButton(**kwargs)
@@ -181,7 +183,7 @@ def kb_main(subscribed: bool):
         rows.append([_btn("🚀 إعلان جديد", callback_data="ad:start", style="primary")])
     rows.append([
         _btn("🎟 تفعيل كود", callback_data="redeem", style="success"),
-        _btn("🛠 دعم", url=SUPPORT_URL)
+        _btn("🛠 دعم", url=SUPPORT_URL)          # بدون style لأن "secondary" غير صالحة
     ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -210,16 +212,14 @@ def kb_proxy_choice():
     return InlineKeyboardMarkup(inline_keyboard=[
         [_btn("🔄 تلقائي من البوت", callback_data="proxy:auto", style="primary")],
         [_btn("✋ إدخال يدوي", callback_data="proxy:manual", style="primary")],
-        [_btn("❌ بدون بروكسي", callback_data="proxy:none")],
+        [_btn("❌ بدون بروكسي", callback_data="proxy:none")],   # بدون style
         [_btn("🏠 الرئيسية", callback_data="home", style="danger")]
     ])
 
-# ✅ تم تحديثها: إضافة الزر الثالث
 def kb_ad_status():
     return InlineKeyboardMarkup(inline_keyboard=[
         [_btn("▶️ نشط (ACTIVE)", callback_data="status:ACTIVE", style="success")],
-        [_btn("⏸ متوقف (PAUSED)", callback_data="status:PAUSED")],
-        [_btn("⏸ متوقف + إلغاء نشر الصفحة", callback_data="status:PAUSED_UNPUBLISH", style="danger")],
+        [_btn("⏸ متوقف (PAUSED)", callback_data="status:PAUSED")],  # بدون style
         [_btn("🏠 الرئيسية", callback_data="home", style="danger")]
     ])
 
@@ -235,18 +235,18 @@ def kb_confirm():
     return InlineKeyboardMarkup(inline_keyboard=[
         [_btn("✅ تأكيد", callback_data="confirm:yes", style="success"),
          _btn("❌ إلغاء", callback_data="confirm:no", style="danger")],
-        [_btn("🏠 الرئيسية", callback_data="home")]
+        [_btn("🏠 الرئيسية", callback_data="home")]   # بدون style
     ])
 
 def kb_back():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [_btn("🔙 رجوع", callback_data="back")],
+        [_btn("🔙 رجوع", callback_data="back")],      # بدون style
         [_btn("🏠 الرئيسية", callback_data="home", style="danger")]
     ])
 
 def kb_home():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [_btn("🏠 الرئيسية", callback_data="home")]
+        [_btn("🏠 الرئيسية", callback_data="home")]   # بدون style
     ])
 
 def kb_admin():
@@ -262,6 +262,8 @@ def kb_admin():
 
 # ─── Facebook API ────────────────────────────────────────
 def fb_error_detail(result: dict) -> str:
+    """يرجع أوضح رسالة خطأ ممكنة من رد فيسبوك (فيسبوك بيدي تفاصيل أكتر في
+    error_user_msg/error_subcode غالبًا بيتجاهلها لو اعتمدنا على message بس)."""
     err = result.get("error", {})
     if isinstance(err, str):
         return err if err else "Unknown error"
@@ -325,6 +327,7 @@ async def fb_upload_image(token: str, page_id: str, image_bytes: bytes, proxy: d
                 try:
                     result = await resp.json()
                 except Exception:
+                    # الرد مش JSON (صفحة خطأ من البروكسي مثلاً) - نطبع الراو تيكست عشان نشوف السبب
                     raw_text = await resp.text()
                     return {"ok": False, "error": f"HTTP {status} - رد غير متوقع: {raw_text[:200]}"}
 
@@ -346,6 +349,10 @@ async def fb_create_dark_post(token: str, page_id: str, image_id: str, message: 
     result = await fb_request("POST", f"{page_id}/feed", data, proxy)
     return {"ok": "id" in result, "id": result.get("id"), "error": fb_error_detail(result) if "error" in result else ""}
 
+# فيسبوك أوقف قبول الـ legacy objectives على حسابات ODAX (من 2022 بيتفعل تدريجيًا
+# على كل الحسابات). الماب ده بيحول كل هدف قديم لـ:
+#   1) outcome objective اللي يتبعت لـ /campaigns
+#   2) optimization_goal الصحيح اللي يتبعت لـ /adsets (مختلف عن الـ objective نفسه!)
 OBJECTIVE_MAP = {
     "POST_ENGAGEMENT":  {"outcome": "OUTCOME_ENGAGEMENT", "opt_goal": "POST_ENGAGEMENT"},
     "PAGE_LIKES":       {"outcome": "OUTCOME_ENGAGEMENT", "opt_goal": "PAGE_LIKES"},
@@ -362,6 +369,7 @@ OBJECTIVE_MAP = {
 }
 
 def resolve_objective(legacy_objective: str) -> dict:
+    """يرجع dict فيه outcome objective + optimization goal الصحيحين، مع fallback أمان."""
     mapped = OBJECTIVE_MAP.get(legacy_objective)
     if mapped:
         return mapped
@@ -375,7 +383,14 @@ async def fb_create_campaign(token: str, acc_id: str, objective: str, budget: fl
         "name": f"Boost_{int(datetime.now().timestamp())}",
         "objective": resolved["outcome"],
         "status": "PAUSED",
+        # daily_budget اتشالت من هنا عمدًا: لما تتحدد ميزانية على الكامبين، فيسبوك بيحوّله
+        # تلقائيًا لـ Campaign Budget Optimization (CBO)، وفي الحالة دي مفيش لازمة (وممنوع)
+        # تحدد bid_strategy على مستوى الأدسيت - وده اللي كان بيخلي فيسبوك يرجع لـ
+        # LOWEST_COST_WITH_BID_CAP الافتراضي ويطلب bid_amount. الميزانية والـ bid_strategy
+        # دلوقتي على مستوى الأدسيت بس (Ad Set Budget Optimization - ABO).
         "special_ad_categories": json.dumps(special_ad_categories if special_ad_categories else []),
+        # مطلوب صراحة لما الميزانية على مستوى الأدسيت (ABO) مش الكامبين. False يعني كل
+        # أدسيت بميزانيته المحددة بدون مشاركة 20% بين الأدسيتس.
         "is_adset_budget_sharing_enabled": "false"
     }
     result = await fb_request("POST", f"act_{acc_id}/campaigns", data, proxy)
@@ -388,9 +403,13 @@ async def fb_create_adset(token: str, acc_id: str, camp_id: str, budget: float, 
         "campaign_id": camp_id, "daily_budget": int(budget * 100),
         "targeting": json.dumps(targeting), "status": "PAUSED",
         "billing_event": "IMPRESSIONS", "optimization_goal": opt_goal,
+        # من غير bid_strategy صريحة، فيسبوك بيرجع لـ LOWEST_COST_WITH_BID_CAP اللي بيطلب
+        # bid_amount إلزامي. الإستراتيجية دي تخلي فيسبوك يدير المزايدة أوتوماتيك من غير سقف.
         "bid_strategy": "LOWEST_COST_WITHOUT_CAP"
     }
     if destination_type:
+        # مطلوب لإعلانات المحادثات (optimization_goal=CONVERSATIONS) عشان فيسبوك يعرف
+        # إن الوجهة هي محادثة Messenger مش بوست عادي
         data["destination_type"] = destination_type
     result = await fb_request("POST", f"act_{acc_id}/adsets", data, proxy)
     return {"ok": "id" in result, "id": result.get("id"), "error": fb_error_detail(result) if "error" in result else ""}
@@ -411,17 +430,6 @@ async def fb_update_ad_status(token: str, ad_id: str, status: str, proxy: dict =
     }
     result = await fb_request("POST", ad_id, data, proxy)
     return {"ok": "id" in result, "error": result.get("error", {}).get("message", "")}
-
-# ✅ دالة جديدة: إلغاء نشر الصفحة
-async def fb_unpublish_page(page_token: str, page_id: str, proxy: dict = None) -> dict:
-    data = {
-        "access_token": page_token,
-        "is_published": "false"
-    }
-    result = await fb_request("POST", page_id, data, proxy)
-    if result.get("success") is True or "id" in result:
-        return {"ok": True}
-    return {"ok": False, "error": fb_error_detail(result) if "error" in result else str(result)}
 
 # ─── Handlers ────────────────────────────────────────────
 @router.message(Command("start"))
@@ -631,8 +639,8 @@ async def cb_proxy_choice(callback: CallbackQuery, state: FSMContext):
         await state.set_state(AdStates.waiting_image)
         await callback.message.edit_text("📸 أرسل الصورة:", reply_markup=kb_back())
     elif gate == "boost_post":
-        await state.set_state(AdStates.waiting_post_id)
-        await callback.message.edit_text("📝 أدخل Post ID:", reply_markup=kb_back())
+        await state.set_state(AdStates.waiting_country)
+        await callback.message.edit_text("🌍 أدخل الدولة المستهدفة (مثل: EG, US, SA):", reply_markup=kb_back())
     elif gate == "page_like":
         await state.set_state(AdStates.waiting_budget)
         await callback.message.edit_text("💰 أدخل الميزانية اليومية ($):", reply_markup=kb_back())
@@ -660,8 +668,8 @@ async def process_proxy_manual(message: Message, state: FSMContext):
         await state.set_state(AdStates.waiting_image)
         await message.answer("✅ تم حفظ البروكسي.\n📸 أرسل الصورة:", reply_markup=kb_back())
     elif gate == "boost_post":
-        await state.set_state(AdStates.waiting_post_id)
-        await message.answer("✅ تم حفظ البروكسي.\n📝 أدخل Post ID:", reply_markup=kb_back())
+        await state.set_state(AdStates.waiting_country)
+        await message.answer("✅ تم حفظ البروكسي.\n🌍 أدخل الدولة المستهدفة (مثل: EG, US, SA):", reply_markup=kb_back())
     elif gate == "page_like":
         await state.set_state(AdStates.waiting_budget)
         await message.answer("✅ تم حفظ البروكسي.\n💰 أدخل الميزانية اليومية ($):", reply_markup=kb_back())
@@ -741,19 +749,28 @@ async def process_age(message: Message, state: FSMContext):
 async def cb_gender(callback: CallbackQuery, state: FSMContext):
     gender = callback.data.split(":")[1]
     await state.update_data(gender=gender)
-    await state.set_state(AdStates.waiting_budget)
-    await callback.message.edit_text(f"✅ الجنس: {gender}\n💰 أدخل الميزانية اليومية ($):", reply_markup=kb_back())
+
+    data = await state.get_data()
+    gate = data.get("gate")
+
+    if gate == "boost_post":
+        await state.set_state(AdStates.waiting_post_id)
+        await callback.message.edit_text(f"✅ الجنس: {gender}\n📝 أدخل رقم البوست (Post ID):", reply_markup=kb_back())
+    else:
+        await state.set_state(AdStates.waiting_budget)
+        await callback.message.edit_text(f"✅ الجنس: {gender}\n💰 أدخل الميزانية اليومية ($):", reply_markup=kb_back())
     await callback.answer()
 
 @router.message(AdStates.waiting_post_id)
 async def process_post_id(message: Message, state: FSMContext):
-    if len(message.text) < 5:
-        await message.answer("❌ Post ID قصير جداً", reply_markup=kb_back())
+    text = message.text.strip()
+    if not text.isdigit():
+        await message.answer("❌ أدخل رقم البوست بس (أرقام فقط، بدون رقم الصفحة).", reply_markup=kb_back())
         return
 
-    await state.update_data(post_id=message.text)
+    await state.update_data(post_id=text)
     await state.set_state(AdStates.waiting_budget)
-    await message.answer("✅ تم حفظ Post ID.\n💰 أدخل الميزانية اليومية ($):", reply_markup=kb_back())
+    await message.answer("✅ تم حفظ رقم البوست.\n💰 أدخل الميزانية اليومية ($):", reply_markup=kb_back())
 
 @router.message(AdStates.waiting_event_name)
 async def process_event_name(message: Message, state: FSMContext):
@@ -815,7 +832,6 @@ async def process_days(message: Message, state: FSMContext):
     await state.set_state(AdStates.waiting_ad_status)
     await message.answer("⚡ اختر حالة الإعلان عند الإنشاء:", reply_markup=kb_ad_status())
 
-# ✅ تم تحديثها: إضافة PAUSED_UNPUBLISH في status_names
 @router.callback_query(F.data.startswith("status:"))
 async def cb_ad_status(callback: CallbackQuery, state: FSMContext):
     status = callback.data.split(":")[1]
@@ -834,8 +850,7 @@ async def cb_ad_status(callback: CallbackQuery, state: FSMContext):
 
     status_names = {
         "ACTIVE": "▶️ نشط",
-        "PAUSED": "⏸ متوقف",
-        "PAUSED_UNPUBLISH": "⏸ متوقف + إلغاء نشر الصفحة"
+        "PAUSED": "⏸ متوقف"
     }
 
     summary = f"📋 <b>مراجعة البيانات</b>\n━━━━━━━━━━━━━━━━━━━━\n"
@@ -868,7 +883,6 @@ async def cb_ad_status(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(summary, reply_markup=kb_confirm(), parse_mode="HTML")
     await callback.answer()
 
-# ✅ تم تحديثها: تنفيذ إلغاء النشر بعد إنشاء الإعلان
 @router.callback_query(F.data == "confirm:yes")
 async def cb_confirm_yes(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text("⏳ جاري إنشاء الإعلان...")
@@ -910,6 +924,64 @@ async def cb_confirm_yes(callback: CallbackQuery, state: FSMContext):
                 "age_min": int(age.split("-")[0]),
                 "age_max": int(age.split("-")[1]),
                 "genders": [1] if gender == "male" else [2] if gender == "female" else [1, 2],
+                # مطلوب صراحة من فيسبوك دلوقتي. 0 = نلتزم بالاستهداف اليدوي اللي حدده المستخدم
+                # (عمر/جنس/دولة) بدل ما فيسبوك يوسّع الجمهور تلقائيًا بميزة Advantage Audience.
+                "targeting_automation": {"advantage_audience": 0}
+            }
+            if is_message_objective:
+                # إعلانات "رسائل" لازم تحدد فين هتفتح المحادثة، وإلا فيسبوك يرفض الأدسيت
+                targeting["messenger_positions"] = ["messenger_home"]
+                targeting["device_platforms"] = ["mobile"]
+                targeting["publisher_platforms"] = ["facebook", "messenger"]
+
+            opt_goal = resolve_objective(objective)["opt_goal"]
+            adset = await fb_create_adset(token, acc_id, campaign["id"], budget, targeting, opt_goal, proxy,
+                                            destination_type="MESSENGER" if is_message_objective else None)
+            if not adset.get("ok"):
+                raise Exception(adset.get("error"))
+
+            if is_message_objective:
+                # creative لإعلان رسائل لازم يتضمن call_to_action نوعه MESSAGE_PAGE، مش
+                # مجرد object_story_id لبوست عادي (وده اللي كان يسبب Creative/Objective Mismatch)
+                creative = {
+                    "object_story_id": dark_post["id"],
+                    "call_to_action": {
+                        "type": "MESSAGE_PAGE",
+                        "value": {"app_destination": "MESSENGER"}
+                    }
+                }
+            else:
+                creative = {"object_story_id": dark_post["id"]}
+            ad = await fb_create_ad(token, acc_id, adset["id"], creative, ad_status, proxy)
+            if not ad.get("ok"):
+                raise Exception(ad.get("error"))
+
+            await callback.message.edit_text(
+                f"✅ تم إنشاء الإعلان بنجاح!\n\n🆔 Ad ID: <code>{ad['id']}</code>\n⚡ الحالة: {ad_status}",
+                reply_markup=kb_home(),
+                parse_mode="HTML"
+            )
+
+        elif gate == "boost_post":
+            page_id = data.get("page_id")
+            post_id = data.get("post_id")
+            country = data.get("country")
+            age = data.get("age")
+            gender = data.get("gender")
+
+            campaign = await fb_create_campaign(token, acc_id, objective, budget, proxy)
+            if not campaign.get("ok"):
+                raise Exception(campaign.get("error"))
+
+            is_message_objective = resolve_objective(objective)["opt_goal"] == "CONVERSATIONS"
+
+            # المسار ده حاليًا مايمرّ مش على شاشات country/age/gender (تصميم الـ flow الأصلي)،
+            # فلو القيم دي مش موجودة نستخدم استهداف افتراضي واسع بدل ما نطلع exception على None
+            targeting = {
+                "geo_locations": {"countries": [country] if country else ["EG"]},
+                "age_min": int(age.split("-")[0]) if age else 18,
+                "age_max": int(age.split("-")[1]) if age else 65,
+                "genders": [1] if gender == "male" else [2] if gender == "female" else [1, 2],
                 "targeting_automation": {"advantage_audience": 0}
             }
             if is_message_objective:
@@ -923,34 +995,25 @@ async def cb_confirm_yes(callback: CallbackQuery, state: FSMContext):
             if not adset.get("ok"):
                 raise Exception(adset.get("error"))
 
+            # post_id لازم يكون بصيغة {page_id}_{post_id} عشان object_story_id يتقبل من فيسبوك
+            full_post_id = post_id if "_" in post_id else f"{page_id}_{post_id}"
             if is_message_objective:
                 creative = {
-                    "object_story_id": dark_post["id"],
+                    "object_story_id": full_post_id,
                     "call_to_action": {
                         "type": "MESSAGE_PAGE",
                         "value": {"app_destination": "MESSENGER"}
                     }
                 }
             else:
-                creative = {"object_story_id": dark_post["id"]}
-            
-            # لو الحالة هي PAUSED_UNPUBLISH، نبعت PAUSED لإنشاء الإعلان عشان فيسبوك يتقبله
-            actual_ad_status = "PAUSED" if ad_status == "PAUSED_UNPUBLISH" else ad_status
-            ad = await fb_create_ad(token, acc_id, adset["id"], creative, actual_ad_status, proxy)
+                creative = {"object_story_id": full_post_id}
+
+            ad = await fb_create_ad(token, acc_id, adset["id"], creative, ad_status, proxy)
             if not ad.get("ok"):
                 raise Exception(ad.get("error"))
 
-            extra_msg = ""
-            # لو اختار إلغاء نشر الصفحة، ننفذ الأمر بعد نجاح إنشاء الإعلان
-            if ad_status == "PAUSED_UNPUBLISH":
-                unpublish_res = await fb_unpublish_page(token, page_id, proxy)
-                if unpublish_res.get("ok"):
-                    extra_msg = "\n✅ تم إلغاء نشر الصفحة بنجاح."
-                else:
-                    extra_msg = f"\n⚠️ تحذير: فشل إلغاء نشر الصفحة: {unpublish_res.get('error')}"
-
             await callback.message.edit_text(
-                f"✅ تم إنشاء الإعلان بنجاح!\n\n🆔 Ad ID: <code>{ad['id']}</code>\n⚡ الحالة: {ad_status}{extra_msg}",
+                f"✅ تم إنشاء الإعلان بنجاح!\n\n🆔 Ad ID: <code>{ad['id']}</code>\n⚡ الحالة: {ad_status}",
                 reply_markup=kb_home(),
                 parse_mode="HTML"
             )

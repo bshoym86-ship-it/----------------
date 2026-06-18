@@ -321,11 +321,38 @@ async def fb_create_dark_post(token: str, page_id: str, image_id: str, message: 
     result = await fb_request("POST", f"{page_id}/feed", data, proxy)
     return {"ok": "id" in result, "id": result.get("id"), "error": result.get("error", {}).get("message", "")}
 
+# فيسبوك أوقف قبول الـ legacy objectives على حسابات ODAX (من 2022 بيتفعل تدريجيًا
+# على كل الحسابات). الماب ده بيحول كل هدف قديم لـ:
+#   1) outcome objective اللي يتبعت لـ /campaigns
+#   2) optimization_goal الصحيح اللي يتبعت لـ /adsets (مختلف عن الـ objective نفسه!)
+OBJECTIVE_MAP = {
+    "POST_ENGAGEMENT":  {"outcome": "OUTCOME_ENGAGEMENT", "opt_goal": "POST_ENGAGEMENT"},
+    "PAGE_LIKES":       {"outcome": "OUTCOME_ENGAGEMENT", "opt_goal": "PAGE_LIKES"},
+    "REACH":            {"outcome": "OUTCOME_AWARENESS",  "opt_goal": "REACH"},
+    "BRAND_AWARENESS":  {"outcome": "OUTCOME_AWARENESS",  "opt_goal": "AD_RECALL_LIFT"},
+    "LINK_CLICKS":      {"outcome": "OUTCOME_TRAFFIC",    "opt_goal": "LINK_CLICKS"},
+    "VIDEO_VIEWS":      {"outcome": "OUTCOME_AWARENESS",  "opt_goal": "THRUPLAY"},
+    "CONVERSATIONS":    {"outcome": "OUTCOME_ENGAGEMENT", "opt_goal": "CONVERSATIONS"},
+    "MESSAGES":         {"outcome": "OUTCOME_ENGAGEMENT", "opt_goal": "CONVERSATIONS"},
+    "LEAD_GENERATION":  {"outcome": "OUTCOME_LEADS",      "opt_goal": "LEAD_GENERATION"},
+    "CONVERSIONS":      {"outcome": "OUTCOME_SALES",      "opt_goal": "OFFSITE_CONVERSIONS"},
+    "APP_INSTALLS":     {"outcome": "OUTCOME_APP_PROMOTION", "opt_goal": "APP_INSTALLS"},
+    "EVENT_RESPONSES":  {"outcome": "OUTCOME_ENGAGEMENT", "opt_goal": "EVENT_RESPONSES"},
+}
+
+def resolve_objective(legacy_objective: str) -> dict:
+    """يرجع dict فيه outcome objective + optimization goal الصحيحين، مع fallback أمان."""
+    mapped = OBJECTIVE_MAP.get(legacy_objective)
+    if mapped:
+        return mapped
+    return {"outcome": "OUTCOME_ENGAGEMENT", "opt_goal": "POST_ENGAGEMENT"}
+
 async def fb_create_campaign(token: str, acc_id: str, objective: str, budget: float, proxy: dict = None) -> dict:
+    resolved = resolve_objective(objective)
     data = {
         "access_token": token,
         "name": f"Boost_{int(datetime.now().timestamp())}",
-        "objective": objective,
+        "objective": resolved["outcome"],
         "status": "PAUSED",
         "daily_budget": int(budget * 100)
     }
@@ -839,7 +866,8 @@ async def cb_confirm_yes(callback: CallbackQuery, state: FSMContext):
                 "genders": [1] if gender == "male" else [2] if gender == "female" else [1, 2]
             }
 
-            adset = await fb_create_adset(token, acc_id, campaign["id"], budget, targeting, objective, proxy)
+            opt_goal = resolve_objective(objective)["opt_goal"]
+            adset = await fb_create_adset(token, acc_id, campaign["id"], budget, targeting, opt_goal, proxy)
             if not adset.get("ok"):
                 raise Exception(adset.get("error"))
 

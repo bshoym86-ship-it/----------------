@@ -384,7 +384,10 @@ async def fb_create_adset(token: str, acc_id: str, camp_id: str, budget: float, 
         "name": f"AdSet_{int(datetime.now().timestamp())}",
         "campaign_id": camp_id, "daily_budget": int(budget * 100),
         "targeting": json.dumps(targeting), "status": "PAUSED",
-        "billing_event": "IMPRESSIONS", "optimization_goal": opt_goal
+        "billing_event": "IMPRESSIONS", "optimization_goal": opt_goal,
+        # من غير bid_strategy صريحة، فيسبوك بيرجع لـ LOWEST_COST_WITH_BID_CAP اللي بيطلب
+        # bid_amount إلزامي. الإستراتيجية دي تخلي فيسبوك يدير المزايدة أوتوماتيك من غير سقف.
+        "bid_strategy": "LOWEST_COST_WITHOUT_CAP"
     }
     result = await fb_request("POST", f"act_{acc_id}/adsets", data, proxy)
     return {"ok": "id" in result, "id": result.get("id"), "error": fb_error_detail(result) if "error" in result else ""}

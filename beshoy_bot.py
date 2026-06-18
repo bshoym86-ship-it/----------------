@@ -396,7 +396,7 @@ async def fb_create_campaign(token: str, acc_id: str, objective: str, budget: fl
     result = await fb_request("POST", f"act_{acc_id}/campaigns", data, proxy)
     return {"ok": "id" in result, "id": result.get("id"), "error": fb_error_detail(result) if "error" in result else ""}
 
-async def fb_create_adset(token: str, acc_id: str, camp_id: str, budget: float, targeting: dict, opt_goal: str = "REACH", proxy: dict = None) -> dict:
+async def fb_create_adset(token: str, acc_id: str, camp_id: str, budget: float, targeting: dict, opt_goal: str = "REACH", proxy: dict = None, destination_type: str = None) -> dict:
     data = {
         "access_token": token,
         "name": f"AdSet_{int(datetime.now().timestamp())}",
@@ -407,6 +407,10 @@ async def fb_create_adset(token: str, acc_id: str, camp_id: str, budget: float, 
         # bid_amount إلزامي. الإستراتيجية دي تخلي فيسبوك يدير المزايدة أوتوماتيك من غير سقف.
         "bid_strategy": "LOWEST_COST_WITHOUT_CAP"
     }
+    if destination_type:
+        # مطلوب لإعلانات المحادثات (optimization_goal=CONVERSATIONS) عشان فيسبوك يعرف
+        # إن الوجهة هي محادثة Messenger مش بوست عادي
+        data["destination_type"] = destination_type
     result = await fb_request("POST", f"act_{acc_id}/adsets", data, proxy)
     return {"ok": "id" in result, "id": result.get("id"), "error": fb_error_detail(result) if "error" in result else ""}
 
@@ -904,6 +908,8 @@ async def cb_confirm_yes(callback: CallbackQuery, state: FSMContext):
             if not campaign.get("ok"):
                 raise Exception(campaign.get("error"))
 
+            is_message_objective = resolve_objective(objective)["opt_goal"] == "CONVERSATIONS"
+
             targeting = {
                 "geo_locations": {"countries": [country]},
                 "age_min": int(age.split("-")[0]),
@@ -913,13 +919,30 @@ async def cb_confirm_yes(callback: CallbackQuery, state: FSMContext):
                 # (عمر/جنس/دولة) بدل ما فيسبوك يوسّع الجمهور تلقائيًا بميزة Advantage Audience.
                 "targeting_automation": {"advantage_audience": 0}
             }
+            if is_message_objective:
+                # إعلانات "رسائل" لازم تحدد فين هتفتح المحادثة، وإلا فيسبوك يرفض الأدسيت
+                targeting["messenger_positions"] = ["messenger_home"]
+                targeting["device_platforms"] = ["mobile"]
+                targeting["publisher_platforms"] = ["facebook", "messenger"]
 
             opt_goal = resolve_objective(objective)["opt_goal"]
-            adset = await fb_create_adset(token, acc_id, campaign["id"], budget, targeting, opt_goal, proxy)
+            adset = await fb_create_adset(token, acc_id, campaign["id"], budget, targeting, opt_goal, proxy,
+                                            destination_type="MESSENGER" if is_message_objective else None)
             if not adset.get("ok"):
                 raise Exception(adset.get("error"))
 
-            creative = {"object_story_id": dark_post["id"]}
+            if is_message_objective:
+                # creative لإعلان رسائل لازم يتضمن call_to_action نوعه MESSAGE_PAGE، مش
+                # مجرد object_story_id لبوست عادي (وده اللي كان يسبب Creative/Objective Mismatch)
+                creative = {
+                    "object_story_id": dark_post["id"],
+                    "call_to_action": {
+                        "type": "MESSAGE_PAGE",
+                        "value": {"app_destination": "MESSENGER"}
+                    }
+                }
+            else:
+                creative = {"object_story_id": dark_post["id"]}
             ad = await fb_create_ad(token, acc_id, adset["id"], creative, ad_status, proxy)
             if not ad.get("ok"):
                 raise Exception(ad.get("error"))

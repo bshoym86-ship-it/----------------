@@ -383,9 +383,11 @@ async def fb_create_campaign(token: str, acc_id: str, objective: str, budget: fl
         "name": f"Boost_{int(datetime.now().timestamp())}",
         "objective": resolved["outcome"],
         "status": "PAUSED",
-        "daily_budget": int(budget * 100),
-        # فيسبوك بقى يطلب الحقل ده صراحة في كل كامبين. لو مفيش فئة حساسة (إسكان/عمل/قروض/سياسة..)
-        # المفروض تتبعت array فاضية، مش الحقل يتسيب خالص.
+        # daily_budget اتشالت من هنا عمدًا: لما تتحدد ميزانية على الكامبين، فيسبوك بيحوّله
+        # تلقائيًا لـ Campaign Budget Optimization (CBO)، وفي الحالة دي مفيش لازمة (وممنوع)
+        # تحدد bid_strategy على مستوى الأدسيت - وده اللي كان بيخلي فيسبوك يرجع لـ
+        # LOWEST_COST_WITH_BID_CAP الافتراضي ويطلب bid_amount. الميزانية والـ bid_strategy
+        # دلوقتي على مستوى الأدسيت بس (Ad Set Budget Optimization - ABO).
         "special_ad_categories": json.dumps(special_ad_categories if special_ad_categories else [])
     }
     result = await fb_request("POST", f"act_{acc_id}/campaigns", data, proxy)

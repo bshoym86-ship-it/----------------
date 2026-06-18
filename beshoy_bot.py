@@ -452,6 +452,41 @@ async def cmd_admin(message: Message, state: FSMContext):
     await state.set_state(AdStates.waiting_admin_password)
     await message.answer("🔐 أدخل كلمة المرور:", reply_markup=kb_home())
 
+@router.message(Command("checktoken"))
+async def cmd_check_token(message: Message, state: FSMContext):
+    data = await state.get_data()
+    token = data.get("token")
+    if not token:
+        await message.answer("❌ مفيش توكن محفوظ حاليًا في الجلسة. ابدأ إعلان جديد الأول لحد ما تدخل التوكن.", reply_markup=kb_home())
+        return
+
+    proxy = data.get("proxy")
+    # debug_token محتاج access_token معتمد لفحص input_token - بنستخدم نفس التوكن في الاتنين
+    result = await fb_request("GET", "debug_token", {"input_token": token, "access_token": token}, proxy)
+
+    info = result.get("data", {})
+    if not info:
+        await message.answer(f"❌ فشل فحص التوكن: {fb_error_detail(result)}", reply_markup=kb_home())
+        return
+
+    is_valid = info.get("is_valid", False)
+    token_type = info.get("type", "?")
+    scopes = info.get("scopes", [])
+    scopes_text = "\n".join(f"  • {s}" for s in scopes) if scopes else "  (مفيش صلاحيات)"
+
+    required = {"ads_management", "pages_manage_ads", "pages_manage_posts"}
+    missing = required - set(scopes)
+    missing_text = ("\n\n⚠️ صلاحيات ناقصة:\n" + "\n".join(f"  • {m}" for m in missing)) if missing else "\n\n✅ كل الصلاحيات المطلوبة موجودة"
+
+    text = (
+        f"🔍 <b>فحص التوكن الفعلي المستخدم حاليًا</b>\n\n"
+        f"النوع: {token_type}\n"
+        f"صالح: {'✅ نعم' if is_valid else '❌ لا'}\n\n"
+        f"الصلاحيات (Scopes):\n{scopes_text}"
+        f"{missing_text}"
+    )
+    await message.answer(text, reply_markup=kb_home(), parse_mode="HTML")
+
 @router.message(AdStates.waiting_admin_password)
 async def process_admin_password(message: Message, state: FSMContext):
     if message.text == ADMIN_PASS:

@@ -347,14 +347,18 @@ def resolve_objective(legacy_objective: str) -> dict:
         return mapped
     return {"outcome": "OUTCOME_ENGAGEMENT", "opt_goal": "POST_ENGAGEMENT"}
 
-async def fb_create_campaign(token: str, acc_id: str, objective: str, budget: float, proxy: dict = None) -> dict:
+async def fb_create_campaign(token: str, acc_id: str, objective: str, budget: float, proxy: dict = None,
+                              special_ad_categories: list = None) -> dict:
     resolved = resolve_objective(objective)
     data = {
         "access_token": token,
         "name": f"Boost_{int(datetime.now().timestamp())}",
         "objective": resolved["outcome"],
         "status": "PAUSED",
-        "daily_budget": int(budget * 100)
+        "daily_budget": int(budget * 100),
+        # فيسبوك بقى يطلب الحقل ده صراحة في كل كامبين. لو مفيش فئة حساسة (إسكان/عمل/قروض/سياسة..)
+        # المفروض تتبعت array فاضية، مش الحقل يتسيب خالص.
+        "special_ad_categories": json.dumps(special_ad_categories if special_ad_categories else [])
     }
     result = await fb_request("POST", f"act_{acc_id}/campaigns", data, proxy)
     return {"ok": "id" in result, "id": result.get("id"), "error": result.get("error", {}).get("message", "")}

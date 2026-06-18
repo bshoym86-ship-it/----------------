@@ -261,6 +261,21 @@ def kb_admin():
     ])
 
 # ─── Facebook API ────────────────────────────────────────
+def fb_error_detail(result: dict) -> str:
+    """يرجع أوضح رسالة خطأ ممكنة من رد فيسبوك (فيسبوك بيدي تفاصيل أكتر في
+    error_user_msg/error_subcode غالبًا بيتجاهلها لو اعتمدنا على message بس)."""
+    err = result.get("error", {})
+    parts = []
+    if err.get("message"):
+        parts.append(err["message"])
+    if err.get("error_user_title"):
+        parts.append(f"({err['error_user_title']})")
+    if err.get("error_user_msg"):
+        parts.append(err["error_user_msg"])
+    if err.get("error_subcode"):
+        parts.append(f"[subcode: {err['error_subcode']}]")
+    return " | ".join(parts) if parts else "Unknown error"
+
 async def fb_request(method: str, endpoint: str, data: dict = None, proxy: dict = None) -> dict:
     url = f"{FB_API}/{endpoint}"
     async with aiohttp.ClientSession() as session:
@@ -319,7 +334,7 @@ async def fb_create_dark_post(token: str, page_id: str, image_id: str, message: 
     if link:
         data["link"] = link
     result = await fb_request("POST", f"{page_id}/feed", data, proxy)
-    return {"ok": "id" in result, "id": result.get("id"), "error": result.get("error", {}).get("message", "")}
+    return {"ok": "id" in result, "id": result.get("id"), "error": fb_error_detail(result) if "error" in result else ""}
 
 # فيسبوك أوقف قبول الـ legacy objectives على حسابات ODAX (من 2022 بيتفعل تدريجيًا
 # على كل الحسابات). الماب ده بيحول كل هدف قديم لـ:
@@ -361,7 +376,7 @@ async def fb_create_campaign(token: str, acc_id: str, objective: str, budget: fl
         "special_ad_categories": json.dumps(special_ad_categories if special_ad_categories else [])
     }
     result = await fb_request("POST", f"act_{acc_id}/campaigns", data, proxy)
-    return {"ok": "id" in result, "id": result.get("id"), "error": result.get("error", {}).get("message", "")}
+    return {"ok": "id" in result, "id": result.get("id"), "error": fb_error_detail(result) if "error" in result else ""}
 
 async def fb_create_adset(token: str, acc_id: str, camp_id: str, budget: float, targeting: dict, opt_goal: str = "REACH", proxy: dict = None) -> dict:
     data = {
@@ -372,7 +387,7 @@ async def fb_create_adset(token: str, acc_id: str, camp_id: str, budget: float, 
         "billing_event": "IMPRESSIONS", "optimization_goal": opt_goal
     }
     result = await fb_request("POST", f"act_{acc_id}/adsets", data, proxy)
-    return {"ok": "id" in result, "id": result.get("id"), "error": result.get("error", {}).get("message", "")}
+    return {"ok": "id" in result, "id": result.get("id"), "error": fb_error_detail(result) if "error" in result else ""}
 
 async def fb_create_ad(token: str, acc_id: str, adset_id: str, creative: dict, status: str = "ACTIVE", proxy: dict = None) -> dict:
     data = {
@@ -381,7 +396,7 @@ async def fb_create_ad(token: str, acc_id: str, adset_id: str, creative: dict, s
         "adset_id": adset_id, "creative": json.dumps(creative), "status": status
     }
     result = await fb_request("POST", f"act_{acc_id}/ads", data, proxy)
-    return {"ok": "id" in result, "id": result.get("id"), "error": result.get("error", {}).get("message", "")}
+    return {"ok": "id" in result, "id": result.get("id"), "error": fb_error_detail(result) if "error" in result else ""}
 
 async def fb_update_ad_status(token: str, ad_id: str, status: str, proxy: dict = None) -> dict:
     data = {

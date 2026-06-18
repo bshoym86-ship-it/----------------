@@ -908,7 +908,10 @@ async def cb_confirm_yes(callback: CallbackQuery, state: FSMContext):
                 "geo_locations": {"countries": [country]},
                 "age_min": int(age.split("-")[0]),
                 "age_max": int(age.split("-")[1]),
-                "genders": [1] if gender == "male" else [2] if gender == "female" else [1, 2]
+                "genders": [1] if gender == "male" else [2] if gender == "female" else [1, 2],
+                # مطلوب صراحة من فيسبوك دلوقتي. 0 = نلتزم بالاستهداف اليدوي اللي حدده المستخدم
+                # (عمر/جنس/دولة) بدل ما فيسبوك يوسّع الجمهور تلقائيًا بميزة Advantage Audience.
+                "targeting_automation": {"advantage_audience": 0}
             }
 
             opt_goal = resolve_objective(objective)["opt_goal"]

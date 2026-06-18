@@ -265,6 +265,10 @@ def fb_error_detail(result: dict) -> str:
     """يرجع أوضح رسالة خطأ ممكنة من رد فيسبوك (فيسبوك بيدي تفاصيل أكتر في
     error_user_msg/error_subcode غالبًا بيتجاهلها لو اعتمدنا على message بس)."""
     err = result.get("error", {})
+    if isinstance(err, str):
+        return err if err else "Unknown error"
+    if not isinstance(err, dict):
+        return str(err) if err else "Unknown error"
     parts = []
     if err.get("message"):
         parts.append(err["message"])
@@ -311,19 +315,28 @@ async def fb_get_page_token(user_token: str, page_id: str, proxy: dict = None) -
 async def fb_upload_image(token: str, page_id: str, image_bytes: bytes, proxy: dict = None) -> dict:
     url = f"{FB_API}/{page_id}/photos"
     data = {"access_token": token, "published": "false"}
-    async with aiohttp.ClientSession() as session:
-        form = aiohttp.FormData()
-        form.add_field("source", image_bytes, filename="image.jpg", content_type="image/jpeg")
-        for k, v in data.items():
-            form.add_field(k, v)
-        try:
-            async with session.post(url, data=form, timeout=30, proxy=proxy.get("http") if proxy else None) as resp:
-                result = await resp.json()
+    try:
+        async with aiohttp.ClientSession() as session:
+            form = aiohttp.FormData()
+            form.add_field("source", image_bytes, filename="image.jpg", content_type="image/jpeg")
+            for k, v in data.items():
+                form.add_field(k, v)
+            async with session.post(url, data=form, timeout=aiohttp.ClientTimeout(total=30),
+                                     proxy=proxy.get("http") if proxy else None) as resp:
+                status = resp.status
+                try:
+                    result = await resp.json()
+                except Exception:
+                    # الرد مش JSON (صفحة خطأ من البروكسي مثلاً) - نطبع الراو تيكست عشان نشوف السبب
+                    raw_text = await resp.text()
+                    return {"ok": False, "error": f"HTTP {status} - رد غير متوقع: {raw_text[:200]}"}
+
                 if "id" in result:
                     return {"ok": True, "id": result["id"]}
-                return {"ok": False, "error": result.get("error", {}).get("message", "Unknown")}
-        except Exception as e:
-            return {"ok": False, "error": str(e)}
+
+                return {"ok": False, "error": fb_error_detail(result) if "error" in result else f"HTTP {status} - رد بدون id: {str(result)[:200]}"}
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {str(e)}"}
 
 async def fb_create_dark_post(token: str, page_id: str, image_id: str, message: str, link: str = "", proxy: dict = None) -> dict:
     data = {
@@ -661,20 +674,25 @@ async def process_image(message: Message, state: FSMContext):
         await message.answer("❌ أرسل صورة (JPG أو PNG).", reply_markup=kb_back())
         return
 
-    photo = message.photo[-1]
-    file = await bot.get_file(photo.file_id)
-    file_url = f"https://api.telegram.org/file/bot{TOKEN}/{file.file_path}"
+    try:
+        photo = message.photo[-1]
+        file = await bot.get_file(photo.file_id)
+        file_url = f"https://api.telegram.org/file/bot{TOKEN}/{file.file_path}"
 
-    async with aiohttp.ClientSession() as session:
-        async with session.get(file_url) as resp:
-            image_bytes = await resp.read()
+        async with aiohttp.ClientSession() as session:
+            async with session.get(file_url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                image_bytes = await resp.read()
+    except Exception as e:
+        await message.answer(f"❌ فشل تحميل الصورة من تيليجرام: {type(e).__name__}: {str(e)}", reply_markup=kb_home())
+        return
 
     data = await state.get_data()
     proxy = data.get("proxy")
     result = await fb_upload_image(data["token"], data["page_id"], image_bytes, proxy)
 
     if not result.get("ok"):
-        await message.answer(f"❌ فشل رفع الصورة: {result.get('error')}", reply_markup=kb_home())
+        err_msg = result.get('error') or "خطأ غير معروف (تحقق من صلاحية التوكن أو إعدادات البروكسي)"
+        await message.answer(f"❌ فشل رفع الصورة: {err_msg}", reply_markup=kb_home())
         return
 
     await state.update_data(image_id=result["id"])

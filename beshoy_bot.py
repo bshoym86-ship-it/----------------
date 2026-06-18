@@ -388,7 +388,10 @@ async def fb_create_campaign(token: str, acc_id: str, objective: str, budget: fl
         # تحدد bid_strategy على مستوى الأدسيت - وده اللي كان بيخلي فيسبوك يرجع لـ
         # LOWEST_COST_WITH_BID_CAP الافتراضي ويطلب bid_amount. الميزانية والـ bid_strategy
         # دلوقتي على مستوى الأدسيت بس (Ad Set Budget Optimization - ABO).
-        "special_ad_categories": json.dumps(special_ad_categories if special_ad_categories else [])
+        "special_ad_categories": json.dumps(special_ad_categories if special_ad_categories else []),
+        # مطلوب صراحة لما الميزانية على مستوى الأدسيت (ABO) مش الكامبين. False يعني كل
+        # أدسيت بميزانيته المحددة بدون مشاركة 20% بين الأدسيتس.
+        "is_adset_budget_sharing_enabled": "false"
     }
     result = await fb_request("POST", f"act_{acc_id}/campaigns", data, proxy)
     return {"ok": "id" in result, "id": result.get("id"), "error": fb_error_detail(result) if "error" in result else ""}
